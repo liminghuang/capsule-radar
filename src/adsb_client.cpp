@@ -11,6 +11,17 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>   // v7
+#include <esp_heap_caps.h>
+
+// Parse the JSON in PSRAM, not internal RAM. Otherwise the per-poll JSON alloc/free
+// churn fragments the internal heap and, after a while, mbedTLS can't find a large
+// enough contiguous block for the TLS handshake (-32512), freezing the feed.
+struct PsramJsonAllocator : ArduinoJson::Allocator {
+    void* allocate(size_t n) override { return heap_caps_malloc(n, MALLOC_CAP_SPIRAM); }
+    void  deallocate(void* p) override { heap_caps_free(p); }
+    void* reallocate(void* p, size_t n) override { return heap_caps_realloc(p, n, MALLOC_CAP_SPIRAM); }
+};
+static PsramJsonAllocator s_jsonPsram;
 
 void AdsbClient::begin(double homeLat, double homeLon, float rangeKm) {
     _lat = homeLat; _lon = homeLon; _rangeKm = rangeKm;
@@ -43,7 +54,7 @@ bool AdsbClient::poll(std::vector<Aircraft>& out) {
     if (code != 200) { http.end(); _useFallback = !_useFallback; return false; }
 
     // Only keep the fields we use -> much smaller parsed document.
-    JsonDocument filter;
+    JsonDocument filter(&s_jsonPsram);
     const char* keys[] = { "ac", "aircraft" };
     const char* flds[] = { "hex", "flight", "t", "lat", "lon", "alt_baro",
                            "track", "true_heading", "gs", "baro_rate",
@@ -52,7 +63,7 @@ bool AdsbClient::poll(std::vector<Aircraft>& out) {
         for (const char* f : flds)
             filter[k][0][f] = true;
 
-    JsonDocument doc;
+    JsonDocument doc(&s_jsonPsram);
     DeserializationError err = deserializeJson(doc, http.getStream(),
                                                DeserializationOption::Filter(filter));
     http.end();

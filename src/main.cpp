@@ -49,6 +49,7 @@ static void adsb_task(void*) {
     std::vector<Aircraft> fresh;
     bool wasConnected = false;
     uint32_t lastPoll = 0;
+    uint32_t lastFeedOk = millis();          // self-heal: time of last good (or no-WiFi) poll
     for (;;) {
         const bool conn = (WiFi.status() == WL_CONNECTED);
         if (conn && !wasConnected) {
@@ -58,6 +59,14 @@ static void adsb_task(void*) {
             // mDNS + OTA are started on core 1 (loop) to keep all mDNS use on one core
         }
         wasConnected = conn;
+        // self-heal: a long feed outage while WiFi is up usually means the internal heap
+        // fragmented and the TLS handshake can't allocate -> reboot to recover (settings persist).
+        if (!conn) lastFeedOk = millis();
+        else if (millis() - lastFeedOk > 180000UL) {
+            Serial.println("[adsb] feed stuck >180s with WiFi up -> restarting to recover");
+            delay(100);
+            ESP.restart();
+        }
         if (g_requery) {                          // display range changed (double-tap zoom)
             g_adsb.begin(g_settings.homeLat, g_settings.homeLon, g_requeryKm);
             g_requery = false;
@@ -73,6 +82,7 @@ static void adsb_task(void*) {
                     Serial.printf("[adsb] fetched %u aircraft\n", (unsigned)fresh.size());
                     failCount = 0;
                     g_feedOk = true;
+                    lastFeedOk = nowMs;
                     if (xSemaphoreTake(g_ac_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
                         g_aircraft = fresh;
                         g_acDirty = true;
