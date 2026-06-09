@@ -20,3 +20,5 @@ void setBrightness(uint8_t v);
 uint32_t inactiveMs();
 
 } // namespace display
+
+uint32_t display_frames();   // total rendered frames (for FPS measurement)

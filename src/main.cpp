@@ -560,11 +560,15 @@ void loop() {
     static uint32_t lastStatus = 0;
     if (millis() - lastStatus > 5000) {
         lastStatus = millis();
-        Serial.printf("[mem] heap %u (min %u, biggest %u) | psram %u free | up %lus | aircraft %d\n",
+        static uint32_t lastFrames = 0;
+        const uint32_t fr = display_frames();
+        const unsigned fps = (fr - lastFrames) / 5;
+        lastFrames = fr;
+        Serial.printf("[mem] heap %u (min %u, biggest %u) | psram %u free | up %lus | aircraft %d | fps %u\n",
                       (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                       (unsigned)ESP.getFreePsram(), (unsigned long)(millis() / 1000),
-                      (int)g_snap.size());
+                      (int)g_snap.size(), fps);
         char clk[8] = "--:--";
         struct tm ti;
         const bool haveTime = getLocalTime(&ti, 0);

@@ -21,12 +21,15 @@ static Arduino_DataBus *s_bus = nullptr;
 static Arduino_CO5300  *s_gfx = nullptr;
 
 // --- LVGL plumbing -----------------------------------------------------------
-#define LVGL_BUF_LINES 80    // partial draw-buffer height (lines); kept in fast internal RAM
+#define LVGL_BUF_LINES 40    // partial draw-buffer height (lines); kept in fast internal RAM
 static lv_disp_draw_buf_t s_draw_buf;
 static lv_disp_drv_t      s_disp_drv;
 static lv_indev_drv_t     s_indev_drv;
 static lv_color_t        *s_buf1 = nullptr;
 static lv_color_t        *s_buf2 = nullptr;
+
+static volatile uint32_t s_frameCount = 0;   // rendered frames (last-flush), for FPS measurement
+uint32_t display_frames() { return s_frameCount; }
 
 // LVGL -> panel. Push the rendered area straight to the CO5300.
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
@@ -37,6 +40,7 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
 #else
     s_gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)px, w, h);
 #endif
+    if (lv_disp_flush_is_last(drv)) s_frameCount++;
     lv_disp_flush_ready(drv);
 }
 
