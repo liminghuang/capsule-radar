@@ -24,6 +24,7 @@ static lv_obj_t *s_cardRoute = nullptr;
 static lv_obj_t *s_photo = nullptr, *s_photoCredit = nullptr;   // aircraft photo above the card
 static char s_lastRouteReq[12] = "";
 static lv_obj_t *s_hudWifi = nullptr, *s_hudCount = nullptr, *s_hudClock = nullptr, *s_hudBatt = nullptr, *s_hudDate = nullptr;
+static lv_obj_t *s_hudBars[4] = { nullptr, nullptr, nullptr, nullptr };   // WiFi signal-strength bars
 static lv_obj_t *s_list = nullptr;
 static lv_obj_t *s_statsLbl = nullptr;
 static lv_obj_t *s_statsNet = nullptr;
@@ -229,10 +230,20 @@ static void list_btn_cb(lv_event_t *e) {
 }
 
 // ----------------------------------------------------------------- list/stats
-void ui_set_status(bool wifiUp, bool feedOk, const char *clock) {
-    if (s_hudWifi) {
-        const lv_color_t c = !wifiUp ? UI_EMERG : (feedOk ? UI_INK : lv_color_hex(0xFFB23C));
-        lv_obj_set_style_text_color(s_hudWifi, c, 0);   // red = no wifi, amber = feed failing
+void ui_set_status(bool wifiUp, bool feedOk, int rssi, const char *clock) {
+    // bar count from RSSI (dBm): the weaker the signal, the fewer lit bars
+    int level;
+    if      (!wifiUp)     level = 0;
+    else if (rssi >= -55) level = 4;   // excellent
+    else if (rssi >= -67) level = 3;   // good
+    else if (rssi >= -75) level = 2;   // ok
+    else                  level = 1;   // weak (connected but marginal)
+    // colour: red = no WiFi, amber = connected but feed stale (no fresh data), white = healthy
+    const lv_color_t col = !wifiUp ? UI_EMERG : (feedOk ? UI_INK : lv_color_hex(0xFFB23C));
+    for (int i = 0; i < 4; ++i) {
+        if (!s_hudBars[i]) continue;
+        lv_obj_set_style_bg_color(s_hudBars[i], col, 0);
+        lv_obj_set_style_bg_opa(s_hudBars[i], (i < level) ? LV_OPA_COVER : 45, 0);
     }
     if (s_hudClock && clock) lv_label_set_text(s_hudClock, clock);
 }
@@ -519,12 +530,23 @@ void ui_create(void) {
     lv_obj_set_style_text_color(s_zoomLbl, UI_GREEN, 0);
     lv_obj_center(s_zoomLbl);
 
-    // top status HUD (wifi / aircraft count / clock); white reads on both themes
-    s_hudWifi = lv_label_create(s_tileRadar);
-    lv_obj_set_style_text_font(s_hudWifi, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_hudWifi, UI_INK, 0);
-    lv_label_set_text(s_hudWifi, LV_SYMBOL_WIFI);
-    lv_obj_align(s_hudWifi, LV_ALIGN_TOP_MID, -92, 50);
+    // top status HUD (wifi / aircraft count / clock); white reads on both themes.
+    // WiFi is a 4-bar signal meter: bar count = RSSI strength, colour = feed health.
+    s_hudWifi = lv_obj_create(s_tileRadar);
+    lv_obj_remove_style_all(s_hudWifi);
+    lv_obj_set_size(s_hudWifi, 21, 14);
+    lv_obj_align(s_hudWifi, LV_ALIGN_TOP_MID, -94, 50);
+    lv_obj_clear_flag(s_hudWifi, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    for (int i = 0; i < 4; ++i) {
+        s_hudBars[i] = lv_obj_create(s_hudWifi);
+        lv_obj_remove_style_all(s_hudBars[i]);
+        lv_obj_set_size(s_hudBars[i], 3, (lv_coord_t)(4 + i * 3));   // 4, 7, 10, 13 px tall
+        lv_obj_align(s_hudBars[i], LV_ALIGN_BOTTOM_LEFT, (lv_coord_t)(i * 5), 0);
+        lv_obj_set_style_radius(s_hudBars[i], 1, 0);
+        lv_obj_set_style_bg_color(s_hudBars[i], UI_INK, 0);
+        lv_obj_set_style_bg_opa(s_hudBars[i], LV_OPA_COVER, 0);
+        lv_obj_clear_flag(s_hudBars[i], LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    }
 
     s_hudCount = lv_label_create(s_tileRadar);
     lv_obj_set_style_text_font(s_hudCount, &lv_font_montserrat_14, 0);

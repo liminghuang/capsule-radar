@@ -39,8 +39,8 @@ static bool http_get(const char *url, uint8_t **out, size_t *outLen, size_t maxL
     cli.setInsecure();
     HTTPClient http;
     http.setReuse(false);
-    http.setConnectTimeout(4000);
-    http.setTimeout(9000);
+    http.setConnectTimeout(3000);    // keep short: this runs on the feed task, a slow photo
+    http.setTimeout(6000);           // server must not freeze the live aircraft poll for long
     if (!http.begin(cli, url)) { Serial.println("[photo]   http.begin failed"); return false; }
     http.setUserAgent(PS_UA);   // planespotters rejects the default UA; set the canonical one
     const int code = http.GET();

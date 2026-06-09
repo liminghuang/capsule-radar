@@ -106,7 +106,7 @@ bool route_fetch(const char *callsign, char *from, size_t fn, char *to, size_t t
     client.setInsecure();
     HTTPClient http;
     http.setReuse(false);
-    http.setConnectTimeout(4000);
+    http.setConnectTimeout(3000);   // short: runs on the feed task, don't stall the live poll
     http.setTimeout(6000);
     if (!http.begin(client, url)) return false;
     http.addHeader("User-Agent", ADSB_USER_AGENT);

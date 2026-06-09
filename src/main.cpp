@@ -49,6 +49,7 @@ static std::vector<Aircraft> g_snap;                                 // last sna
 static volatile bool         g_requery = false;                      // range changed -> adsb_task re-begins
 static float                 g_requeryKm = 0.0f;
 static volatile bool         g_feedOk = true;                        // ADS-B feed healthy? (HUD warning)
+static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis() of the last good poll (HUD staleness)
 
 // ---- networking task (core 0): fetch + parse, never touches the display ----
 static void adsb_task(void*) {
@@ -79,9 +80,35 @@ static void adsb_task(void*) {
             lastPoll = 0;                         // poll immediately at the new radius
         }
         if (conn) {
-            // Service the user's on-demand lookups FIRST, before the periodic poll. A tap
-            // must feel responsive: if a poll is due (and might be slow), it shouldn't make
-            // the just-tapped aircraft sit on "Looking up route / Loading photo" for seconds.
+            // The live aircraft feed is the primary job, so poll FIRST every cycle. That keeps
+            // it refreshing even while the user taps around — a slow route/photo lookup (below)
+            // can block this single network task, so it must never get ahead of the feed.
+            const uint32_t nowMs = millis();
+            const uint32_t pollInterval = g_onBattery ? POLL_INTERVAL_BATTERY_MS : POLL_INTERVAL_MS;
+            if (lastPoll == 0 || nowMs - lastPoll >= pollInterval) {  // aircraft feed
+                lastPoll = nowMs;
+                static int failCount = 0;
+                // poll() flips to the alternate host on failure, so consecutive polls already
+                // alternate hosts; a single transient miss is absorbed by the failCount window.
+                if (g_adsb.poll(fresh)) {
+                    Serial.printf("[adsb] fetched %u aircraft\n", (unsigned)fresh.size());
+                    failCount = 0;
+                    g_feedOk = true;
+                    lastFeedOk = nowMs;
+                    g_lastFeedOkMs = nowMs;          // HUD: mark data as fresh
+                    if (xSemaphoreTake(g_ac_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+                        g_aircraft.swap(fresh);   // O(1) handoff: no per-Aircraft String copies under the lock
+                        g_acDirty = true;
+                        xSemaphoreGive(g_ac_mutex);
+                    }
+                } else {
+                    Serial.println("[adsb] poll failed");
+                    if (++failCount >= 5) g_feedOk = false;   // sustained outage -> HUD warning
+                }
+            }
+            // Then the on-demand lookups for the selected aircraft. Their timeouts are kept
+            // short (see photo_client / route_client) so a slow photo server can't freeze the
+            // feed for long; the next loop iteration polls again as soon as they return.
             char wantCall[12];
             if (route_pending(wantCall, sizeof(wantCall))) {
                 char from[40] = "", to[40] = "";
@@ -99,31 +126,6 @@ static void adsb_task(void*) {
             }
             char wantHex[10];
             if (photo_pending(wantHex, sizeof(wantHex))) photo_fetch(wantHex);
-
-            const uint32_t nowMs = millis();
-            const uint32_t pollInterval = g_onBattery ? POLL_INTERVAL_BATTERY_MS : POLL_INTERVAL_MS;
-            if (lastPoll == 0 || nowMs - lastPoll >= pollInterval) {  // aircraft feed
-                lastPoll = nowMs;
-                static int failCount = 0;
-                // poll() flips to the alternate host on failure, so consecutive polls already
-                // alternate hosts. A single transient miss is absorbed by the failCount window
-                // below (no in-cycle retry — that doubled the worst-case block on a slow host
-                // and starved the route/photo lookups above).
-                if (g_adsb.poll(fresh)) {
-                    Serial.printf("[adsb] fetched %u aircraft\n", (unsigned)fresh.size());
-                    failCount = 0;
-                    g_feedOk = true;
-                    lastFeedOk = nowMs;
-                    if (xSemaphoreTake(g_ac_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-                        g_aircraft.swap(fresh);   // O(1) handoff: no per-Aircraft String copies under the lock
-                        g_acDirty = true;
-                        xSemaphoreGive(g_ac_mutex);
-                    }
-                } else {
-                    Serial.println("[adsb] poll failed");
-                    if (++failCount >= 5) g_feedOk = false;   // sustained outage -> HUD warning
-                }
-            }
         }
         vTaskDelay(pdMS_TO_TICKS(250));
     }
@@ -662,7 +664,13 @@ void loop() {
             strftime(date, sizeof(date), "%d %b %Y", &ti);   // e.g. "08 Jun 2026"
             ui_set_date(date);
         }
-        ui_set_status(WiFi.status() == WL_CONNECTED, g_feedOk, clk);
+        const bool wifiUp = (WiFi.status() == WL_CONNECTED);
+        const int  rssi   = wifiUp ? (int)WiFi.RSSI() : -127;
+        // "fresh" = we got aircraft data recently. Catches a stalled feed (weak WiFi dropping
+        // polls intermittently) that never trips the consecutive-fail counter -> aircraft
+        // freeze but the icon would otherwise stay white.
+        const bool feedFresh = wifiUp && (millis() - g_lastFeedOkMs < 12000UL);
+        ui_set_status(wifiUp, feedFresh, rssi, clk);
         char net[80];
         if (WiFi.status() == WL_CONNECTED)
             snprintf(net, sizeof(net), "Configure at\ncapsuleradar.local\n%s", WiFi.localIP().toString().c_str());
