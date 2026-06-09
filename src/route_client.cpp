@@ -8,6 +8,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <string.h>
+#include <time.h>   // route-cache TTL
 
 #define ROUTE_CACHE_MAX 200   // wrap the cache before it can crowd NVS
 
@@ -28,13 +29,19 @@ bool route_cache_get(const char *callsign, char *from, size_t fn, char *to, size
     if (!key[0]) return false;
     Preferences p;
     if (!p.begin("routes", true)) return false;
-    String v = p.getString(key, "");
+    String v = p.getString(key, "");     // stored as "epoch|from|to"
     p.end();
     if (v.length() == 0) return false;
-    const int bar = v.indexOf('|');
-    if (bar < 0) return false;
-    snprintf(from, fn, "%s", v.substring(0, bar).c_str());
-    snprintf(to, tn, "%s", v.substring(bar + 1).c_str());
+    const int b1 = v.indexOf('|');
+    if (b1 < 0) return false;
+    const uint32_t ts = (uint32_t)v.substring(0, b1).toInt();
+    const String rest = v.substring(b1 + 1);
+    const int b2 = rest.indexOf('|');
+    if (b2 < 0) return false;
+    const uint32_t now = (uint32_t)time(nullptr);    // expire stale routes (reused callsigns)
+    if (now > 1700000000UL && ts > 1700000000UL && (now - ts) > 86400UL) return false;  // 24 h TTL
+    snprintf(from, fn, "%s", rest.substring(0, b2).c_str());
+    snprintf(to, tn, "%s", rest.substring(b2 + 1).c_str());
     return true;
 }
 
@@ -47,7 +54,7 @@ void route_cache_put(const char *callsign, const char *from, const char *to) {
     if (!p.begin("routes", false)) return;
     int n = p.getInt("__n", 0);
     if (n >= ROUTE_CACHE_MAX) { p.clear(); n = 0; }   // wrap to bound NVS usage
-    String v = String(from ? from : "") + "|" + String(to ? to : "");
+    String v = String((uint32_t)time(nullptr)) + "|" + String(from ? from : "") + "|" + String(to ? to : "");
     if (p.putString(key, v) > 0) p.putInt("__n", n + 1);
     p.end();
 }
