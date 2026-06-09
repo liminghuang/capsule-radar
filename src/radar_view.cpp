@@ -41,7 +41,7 @@
 #define DRG_FLOW   lv_color_hex(0xFFC24D)
 
 // ---- sweep config ----
-#define SWEEP_PERIOD_MS   4200
+#define SWEEP_PERIOD_MS   8000
 #define SWEEP_FRAME_MS    30
 #define SWEEP_TRAIL_DEG   38.0f
 #define SWEEP_TRAIL_STEPS 20
