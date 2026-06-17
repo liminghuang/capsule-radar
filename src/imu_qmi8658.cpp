@@ -11,9 +11,8 @@
 #define QMI_CTRL7   0x08   // sensor enable
 #define QMI_AZ_L    0x39   // accel Z low byte (high byte at 0x3A)
 
-// ±2g full scale -> 16384 LSB/g. On this board the IMU Z is inverted, so face-down
-// is strongly POSITIVE Z.
-#define FACEDOWN_THRESHOLD (9800)   // ~ +0.6 g
+// ±2g full scale -> 16384 LSB/g.
+#define FACEDOWN_THRESHOLD (9000)   // ~0.55 g past zero on the side opposite the resting one
 
 static uint8_t s_addr = 0x6B;
 static bool    s_ok   = false;
@@ -62,5 +61,14 @@ int imu_facedown() {
     uint8_t b[2];
     if (!rd(QMI_AZ_L, b, 2)) return -1;
     const int16_t az = (int16_t)((b[1] << 8) | b[0]);
-    return (az > FACEDOWN_THRESHOLD) ? 1 : 0;
+
+    // Orientation-agnostic: we don't assume which Z sign is "up" (it depends on how the
+    // board sits in the case, and it isn't the same on every unit). Track a slow baseline
+    // of the *resting* az and call it face-down when gravity swings to the far OPPOSITE
+    // side — i.e. the device was flipped over. Works whatever the sensor's sign.
+    static int32_t ref = 0; static bool haveRef = false;
+    if (!haveRef) { ref = az; haveRef = true; }
+    const bool down = (ref < 0) ? (az > FACEDOWN_THRESHOLD) : (az < -FACEDOWN_THRESHOLD);
+    if (!down) ref += (az - ref) >> 4;   // EMA toward the current (not-face-down) orientation
+    return down ? 1 : 0;
 }
