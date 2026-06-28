@@ -23,6 +23,29 @@ struct PsramJsonAllocator : ArduinoJson::Allocator {
 };
 static PsramJsonAllocator s_jsonPsram;
 
+// NetworkClient::readBytes() treats a transient negative TLS read as end-of-input,
+// which makes ArduinoJson intermittently report IncompleteInput. Deliberately wrap
+// the client without overriding readBytes(): Stream's timed byte reader retries
+// temporary no-data reads until the configured timeout.
+class ReliableJsonStream : public Stream {
+public:
+    explicit ReliableJsonStream(Stream& source) : _source(source) {}
+    int available() override { return _source.available(); }
+    int read() override {
+        const int value = _source.read();
+        if (value >= 0) ++_bytesRead;
+        return value;
+    }
+    int peek() override { return _source.peek(); }
+    void flush() override { _source.flush(); }
+    size_t write(uint8_t) override { return 0; }
+    size_t bytesRead() const { return _bytesRead; }
+
+private:
+    Stream& _source;
+    size_t _bytesRead = 0;
+};
+
 void AdsbClient::begin(double homeLat, double homeLon, float rangeKm) {
     _lat = homeLat; _lon = homeLon; _rangeKm = rangeKm;
 }
@@ -69,13 +92,19 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
             filter[k][0][f] = true;
 
     JsonDocument doc(&s_jsonPsram);
-    DeserializationError err = deserializeJson(doc, http.getStream(),
+    const int expectedBytes = http.getSize();
+    NetworkClient& responseStream = http.getStream();
+    ReliableJsonStream jsonStream(responseStream);
+    DeserializationError err = deserializeJson(doc, jsonStream,
                                                DeserializationOption::Filter(filter));
-    http.end();
     if (err) {
-        Serial.printf("[adsb] JSON parse failed (%s): %s\n", host, err.c_str());
+        Serial.printf("[adsb] JSON parse failed (%s): %s; expected=%d read=%u available=%d connected=%d\n",
+                      host, err.c_str(), expectedBytes, (unsigned)jsonStream.bytesRead(),
+                      responseStream.available(), responseStream.connected());
+        http.end();
         return false;
     }
+    http.end();
 
     JsonArrayConst arr = doc["ac"].as<JsonArrayConst>();
     if (arr.isNull()) arr = doc["aircraft"].as<JsonArrayConst>();
