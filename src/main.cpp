@@ -8,6 +8,7 @@
 #include "geo.h"
 #include "adsb_client.h"
 #include "snapshot_gate.h"
+#include "brightness_schedule.h"
 #include "route.h"
 #include "route_client.h"
 #include "photo.h"
@@ -39,6 +40,14 @@ static AdsbClient            g_adsb;
 static RadarSettings         g_settings;
 static WiFiManager           g_wm;
 static int                   g_brightnessDay = BRIGHTNESS_DEFAULT;   // user brightness (web/NVS)
+static constexpr int         BRIGHTNESS_SCHEDULE_RULES = 4;
+static BrightnessScheduleRule g_brightnessSchedule[BRIGHTNESS_SCHEDULE_RULES] = {
+    {false, 0x1F,  8 * 60, 17 * 60, 80},   // weekdays 08:00-17:00 at 80%
+    {false, 0x7F, 20 * 60,  8 * 60, 10},   // every day 20:00-08:00 at 10%
+    {false, 0x7F,  0,       0,       50},
+    {false, 0x7F,  0,       0,       50},
+};
+static int                   g_scheduledBrightness = -1;             // panel value, -1=no matching rule
 static int                   g_volume = 60;                          // alert volume 0..100 (web/NVS)
 static bool                  g_muted  = false;                       // mute alert pings
 static int                   g_alertMode = 2;                        // 0=off 1=emergencies 2=new+emergencies (web/NVS)
@@ -202,6 +211,25 @@ static void loadSettings() {
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_units            = p.getInt("units", 0);
     g_tz               = p.getString("tz", TZ_STR);
+    for (int i = 0; i < BRIGHTNESS_SCHEDULE_RULES; ++i) {
+        char key[16];
+        snprintf(key, sizeof(key), "bs%den", i);
+        g_brightnessSchedule[i].enabled = p.getBool(key, g_brightnessSchedule[i].enabled);
+        snprintf(key, sizeof(key), "bs%ddays", i);
+        g_brightnessSchedule[i].dayMask = (uint8_t)p.getUInt(key, g_brightnessSchedule[i].dayMask);
+        snprintf(key, sizeof(key), "bs%dstart", i);
+        g_brightnessSchedule[i].startMinute = (uint16_t)p.getUInt(key, g_brightnessSchedule[i].startMinute);
+        snprintf(key, sizeof(key), "bs%dend", i);
+        g_brightnessSchedule[i].endMinute = (uint16_t)p.getUInt(key, g_brightnessSchedule[i].endMinute);
+        snprintf(key, sizeof(key), "bs%dpct", i);
+        g_brightnessSchedule[i].brightnessPercent = (uint8_t)p.getUInt(key, g_brightnessSchedule[i].brightnessPercent);
+        g_brightnessSchedule[i].dayMask &= 0x7F;
+        if (g_brightnessSchedule[i].startMinute >= 24 * 60) g_brightnessSchedule[i].startMinute = 0;
+        if (g_brightnessSchedule[i].endMinute >= 24 * 60) g_brightnessSchedule[i].endMinute = 0;
+        if (g_brightnessSchedule[i].brightnessPercent < 1 ||
+            g_brightnessSchedule[i].brightnessPercent > 100)
+            g_brightnessSchedule[i].brightnessPercent = 50;
+    }
     p.end();
 }
 
@@ -268,7 +296,7 @@ static void saveTheme(int t) {
 static time_t utc_to_time(struct tm *utc) {
     setenv("TZ", "UTC0", 1); tzset();
     const time_t t = mktime(utc);
-    setenv("TZ", TZ_STR, 1); tzset();   // restore local TZ for getLocalTime()
+    setenv("TZ", g_tz.c_str(), 1); tzset();   // restore configured local TZ for getLocalTime()
     return t;
 }
 
@@ -282,14 +310,30 @@ static void rtc_seed_clock() {
     Serial.println("[rtc] system clock seeded from RTC");
 }
 
-// Brightness combines idle auto-dim and face-down sleep (sleep wins -> screen off).
+// Brightness combines the schedule/default, idle auto-dim and face-down sleep.
 static bool g_asleep = false;   // face-down
 static bool g_idle   = false;   // no touch for a while
 static void applyBrightness() {
-    int b = g_brightnessDay;
+    int b = g_scheduledBrightness >= 0 ? g_scheduledBrightness : g_brightnessDay;
     if (g_idle  && BRIGHTNESS_IDLE  < b) b = BRIGHTNESS_IDLE;   // idle only dims down
     if (g_asleep) b = 0;                                         // face-down -> screen off
     display::setBrightness(b);
+}
+
+static void updateScheduledBrightness() {
+    int next = -1;
+    struct tm ti;
+    if (getLocalTime(&ti, 0)) {
+        int percent = 0;
+        if (brightnessSchedulePercent(g_brightnessSchedule, BRIGHTNESS_SCHEDULE_RULES,
+                                      ti.tm_wday, ti.tm_hour, ti.tm_min, percent))
+            next = brightnessPercentToPanel(percent);
+    }
+    if (next == g_scheduledBrightness) return;
+    g_scheduledBrightness = next;
+    applyBrightness();
+    if (next >= 0) Serial.printf("[display] scheduled brightness %d/255\n", next);
+    else           Serial.println("[display] brightness schedule inactive; using default");
 }
 
 // ----------------------------- configuration web --------------------------------
@@ -384,7 +428,39 @@ static void handleRoot() {
         gpsRow += "<div style='font-size:12px;opacity:.6;margin:-2px 0 6px'>"
                   "When on, the location above is used until the GPS gets a fix, then it takes over.</div>";
     }
-    static const size_t BUFSZ = 10240;
+    static const size_t SCHEDULE_BUFSZ = 7000;
+    static char *scheduleRows = (char *)ps_malloc(SCHEDULE_BUFSZ);
+    if (!scheduleRows) return;
+    size_t scheduleUsed = 0;
+    const auto appendSchedule = [&](const char *format, auto... args) {
+        if (scheduleUsed >= SCHEDULE_BUFSZ - 1) return;
+        const int written = snprintf(scheduleRows + scheduleUsed, SCHEDULE_BUFSZ - scheduleUsed,
+                                     format, args...);
+        if (written <= 0) return;
+        const size_t available = SCHEDULE_BUFSZ - scheduleUsed;
+        scheduleUsed += (size_t)written < available ? (size_t)written : available - 1;
+    };
+    const char *dayNames[] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
+    for (int i = 0; i < BRIGHTNESS_SCHEDULE_RULES; ++i) {
+        const BrightnessScheduleRule &r = g_brightnessSchedule[i];
+        char start[6], end[6];
+        snprintf(start, sizeof(start), "%02d:%02d", (int)r.startMinute / 60, (int)r.startMinute % 60);
+        snprintf(end, sizeof(end), "%02d:%02d", (int)r.endMinute / 60, (int)r.endMinute % 60);
+        appendSchedule(
+            "<div class=sched><label><input type=checkbox class=ck name=s%den %s>Rule %d</label><div class=days>",
+            i, r.enabled ? "checked" : "", i + 1);
+        for (int d = 0; d < 7; ++d) {
+            appendSchedule("<label><input type=checkbox class=ck name=s%dd%d %s>%s</label>",
+                           i, d, (r.dayMask & (1u << d)) ? "checked" : "", dayNames[d]);
+        }
+        appendSchedule(
+            "</div><div class=srow><label>Start<input type=time name=s%dstart value='%s'></label>"
+            "<label>End<input type=time name=s%dend value='%s'></label>"
+            "<label>Brightness (%%)<input type=number min=1 max=100 name=s%dpct value='%u'></label>"
+            "</div></div>",
+            i, start, i, end, i, (unsigned)r.brightnessPercent);
+    }
+    static const size_t BUFSZ = 18432;
     static char *buf = (char *)ps_malloc(BUFSZ);   // PSRAM: keep this big page buffer off the scarce
     if (!buf) return;                              //   internal heap (the contiguous RAM mbedTLS needs)
     snprintf(buf, BUFSZ,
@@ -415,6 +491,10 @@ static void handleRoot() {
         ".ft{color:#5f7a6c;font-size:12px;text-align:center;margin-top:6px}.ft code{color:#9affc8}"
         ".ck{width:auto;display:inline;margin-right:8px;vertical-align:middle}"
         ".sec{background:#0c1a12!important;color:#1dff86!important;border:1px solid #2a4a39!important}"
+        ".sched{border-top:1px solid #1f3a2b;padding-top:8px;margin-top:8px}"
+        ".srow{display:flex;gap:8px}.srow label{flex:1;margin-top:8px}"
+        ".days{display:flex;flex-wrap:wrap;gap:8px}.days label{margin:4px 0;font-size:12px}"
+        ".days .ck{margin-right:3px}"
         "#map{height:220px;border-radius:10px;margin:6px 0 8px;border:1px solid #2a4a39;z-index:0}"
         "</style></head><body>"
         "<div class=hd><div class=dot></div><div><h1>Capsule Radar</h1><p class=sub>Live ADS-B radar &middot; configuration</p></div></div>"
@@ -437,6 +517,9 @@ static void handleRoot() {
         "<label>Aircraft trails</label><select onchange='tl(this.value)'>%s</select>"
         "<label>Screen rotation (USB-C position)</label><select onchange='ro(this.value)'>%s</select>"
         "<label>Units</label><select onchange='u(this.value)'>%s</select></div>"
+        "<div class=card><div class=t>Brightness schedule</div>"
+        "<p style='color:#9affc8;font-size:13px;margin:0 0 6px'>Uses the selected time zone. End time is exclusive; later matching rules take priority.</p>"
+        "<form method=POST action=/schedule>%s<button>Save schedule</button></form></div>"
         "<div class=card><div class=t>Sound</div>"
         "<label>Volume</label>"
         "<input type=range min=0 max=100 value='%d' oninput='v(this.value,0)' onchange='v(this.value,1)'>"
@@ -481,6 +564,7 @@ static void handleRoot() {
         tzopts.c_str(),
         g_brightnessDay, iopts.c_str(), g_showSweep ? "checked" : "",
         g_showAirports ? "checked" : "", tlopts.c_str(), rotopts.c_str(), uopts.c_str(),
+        scheduleRows,
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
     g_web.send(200, "text/html", buf);
@@ -533,6 +617,48 @@ static void handleBright() {
         }
     }
     g_web.send(200, "text/plain", "ok");
+}
+
+static bool parseScheduleTime(const String &value, uint16_t &minutesOut) {
+    if (value.length() != 5 || value[2] != ':') return false;
+    const int hour = value.substring(0, 2).toInt();
+    const int minute = value.substring(3, 5).toInt();
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return false;
+    minutesOut = (uint16_t)(hour * 60 + minute);
+    return true;
+}
+
+static void handleSchedule() {
+    Preferences p;
+    p.begin("capsuleradar", false);
+    for (int i = 0; i < BRIGHTNESS_SCHEDULE_RULES; ++i) {
+        BrightnessScheduleRule &r = g_brightnessSchedule[i];
+        char arg[16], key[16];
+        snprintf(arg, sizeof(arg), "s%den", i);
+        r.enabled = g_web.hasArg(arg);
+        r.dayMask = 0;
+        for (int d = 0; d < 7; ++d) {
+            snprintf(arg, sizeof(arg), "s%dd%d", i, d);
+            if (g_web.hasArg(arg)) r.dayMask |= (uint8_t)(1u << d);
+        }
+        snprintf(arg, sizeof(arg), "s%dstart", i);
+        if (g_web.hasArg(arg)) parseScheduleTime(g_web.arg(arg), r.startMinute);
+        snprintf(arg, sizeof(arg), "s%dend", i);
+        if (g_web.hasArg(arg)) parseScheduleTime(g_web.arg(arg), r.endMinute);
+        snprintf(arg, sizeof(arg), "s%dpct", i);
+        if (g_web.hasArg(arg))
+            r.brightnessPercent = (uint8_t)constrain(g_web.arg(arg).toInt(), 1, 100);
+
+        snprintf(key, sizeof(key), "bs%den", i);    p.putBool(key, r.enabled);
+        snprintf(key, sizeof(key), "bs%ddays", i);  p.putUInt(key, r.dayMask);
+        snprintf(key, sizeof(key), "bs%dstart", i); p.putUInt(key, r.startMinute);
+        snprintf(key, sizeof(key), "bs%dend", i);   p.putUInt(key, r.endMinute);
+        snprintf(key, sizeof(key), "bs%dpct", i);   p.putUInt(key, r.brightnessPercent);
+    }
+    p.end();
+    updateScheduledBrightness();
+    g_web.sendHeader("Location", "/");
+    g_web.send(303, "text/plain", "saved");
 }
 
 static void handleVol() {
@@ -754,9 +880,10 @@ void setup() {
     gps_begin();       // LC76G GNSS (no-op if not the -G variant)
     battery_enable_codec_rail();   // power the ES8311 analog rail before audio init
 
-    setenv("TZ", TZ_STR, 1); tzset();   // local time for display even before NTP
+    setenv("TZ", g_tz.c_str(), 1); tzset();   // configured local time even before NTP
     rtc_begin();
     rtc_seed_clock();                   // offline clock/date from the PCF85063
+    updateScheduledBrightness();
     if (audio_begin()) {                // ES8311 alert pings (no-op if codec absent)
         audio_set_volume(g_volume);
         audio_set_muted(g_muted);
@@ -809,6 +936,7 @@ void setup() {
     g_web.on("/save", HTTP_POST, handleSave);
     g_web.on("/wifi", HTTP_POST, handleWifi);
     g_web.on("/bright", handleBright);
+    g_web.on("/schedule", HTTP_POST, handleSchedule);
     g_web.on("/vol", handleVol);
     g_web.on("/alerts", handleAlerts);
     g_web.on("/idle", handleIdle);
@@ -888,6 +1016,7 @@ void loop() {
             strftime(date, sizeof(date), "%d %b %Y", &ti);   // e.g. "08 Jun 2026"
             ui_set_date(date);
         }
+        updateScheduledBrightness();
         const bool wifiUp = (WiFi.status() == WL_CONNECTED);
         const int  rssi   = wifiUp ? (int)WiFi.RSSI() : -127;
         // "fresh" = we got aircraft data recently. Catches a stalled feed (weak WiFi dropping

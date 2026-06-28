@@ -18,7 +18,7 @@ Visual target: `assets/plane_radar_2.0_mockup.html`.
 3. **Range zoom** — cycle 5 / 10 / 25 / 100 km (tap or long-press), re-query radius accordingly.
 4. **Orientation** — north-up ↔ track-up toggle.
 5. **Alerts** — highlight + speaker **ping** for: emergency squawks (7500/7600/7700), military (`dbFlags`), or a user watch-list of types (A380, B52…). Card flashes red (see RESCUE51 in the mockup).
-6. **Night auto-dim** — use PCF85063 RTC to lower brightness after dusk.
+6. **Scheduled brightness** — four persisted weekday/time rules, including cross-midnight ranges, use the configured time zone and NTP/PCF85063 clock.
 7. **IMU gestures** (QMI8658) — face-down → screen sleep; face-up → wake; shake → force refresh.
 8. **Setup & maintenance** — first-boot **captive portal** (WiFi creds + home lat/lon + range); settings in NVS; **OTA** updates.
 
