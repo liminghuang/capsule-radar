@@ -422,7 +422,7 @@ static void sweep_timer_cb(lv_timer_t *t) {
         display::RippleWave waves[RIPPLE_WAVES];
         for (int i = 0; i < RIPPLE_WAVES; ++i) {
             const float phase = ripple_phase(s_ripplePhase, i);
-            waves[i] = { phase * (float)RADAR_R_OUTER_PX,
+            waves[i] = { phase * (float)RIPPLE_R_OUTER_PX,
                          (uint8_t)(220.0f * (1.0f - 0.9f * phase)) };
         }
         if (directRipple(waves, RIPPLE_WAVES)) return;

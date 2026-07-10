@@ -17,5 +17,9 @@ int main() {
     const RippleRowSpans clipped = rippleRowSpans(5, 50, 20.0f, 4.0f, 50, 0, 30);
     assert(clipped.valid);
     assert(clipped.leftStart == 0 && clipped.rightEnd == 27);
+
+    // A panel-edge ripple must still retain its topmost visible span after clipping.
+    const RippleRowSpans panelEdge = rippleRowSpans(233, 233, 232.0f, 8.0f, 0, 0, 465);
+    assert(panelEdge.valid);
     return 0;
 }

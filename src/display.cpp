@@ -223,7 +223,9 @@ static void markRing(int16_t y, const RippleWave &wave, bool draw) {
 bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
     if (!s_gfx || !s_baseFrame || s_rot != 0 || !waves || count < 1 || count > 2) return false;
     const lv_color_t color = lv_color_hex(rgb);
-    for (int16_t y = SCREEN_CY - RADAR_R_OUTER_PX - 6; y <= SCREEN_CY + RADAR_R_OUTER_PX + 6; ++y) {
+    const int16_t yFirst = LV_MAX(0, SCREEN_CY - RIPPLE_R_OUTER_PX - 6);
+    const int16_t yLast  = LV_MIN(SCREEN_H - 1, SCREEN_CY + RIPPLE_R_OUTER_PX + 6);
+    for (int16_t y = yFirst; y <= yLast; ++y) {
         memset(s_dirty, 0, sizeof(s_dirty)); memset(s_alpha, 0, sizeof(s_alpha));
         for (int i = 0; i < s_oldRippleCount; ++i) markRing(y, s_oldRipple[i], false);
         for (int i = 0; i < count; ++i) markRing(y, waves[i], true);
