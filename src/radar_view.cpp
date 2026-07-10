@@ -60,7 +60,7 @@
 #define RIPPLE_FRAME_MS   40    // 25 FPS target; direct compositor updates only ring spans
 #define RIPPLE_WAVES      2   // a new wave starts when the previous one reaches half range
 #define RIPPLE_WIDTH      2
-#define RIPPLE_GLOW_WIDTH 8
+#define RIPPLE_GLOW_WIDTH RIPPLE_GLOW_WIDTH_PX
 
 // ---- aircraft / flow / orb config ----
 #define TRAIL_MAX         7
@@ -141,9 +141,7 @@ static inline bool orb() { return s_theme == THEME_ORB; }
 static inline bool ripple() { return s_theme == THEME_RIPPLE; }
 #if defined(ESP_PLATFORM)
 static inline bool directRipple(const display::RippleWave *waves, int count) { return display::rippleOverlay(waves, count, s_phosphorScanRgb); }
-// The QSPI compositor addresses panel coordinates directly, so rotated displays
-// must keep the LVGL sweep visible as the correctly transformed fallback.
-static inline bool hasDirectRippleBase() { return display::baseFrame() != nullptr && display::rotation() == 0; }
+static inline bool hasDirectRippleBase() { return display::baseFrame() != nullptr; }
 static inline void clearDirectRipple() { display::clearRippleOverlay(); }
 #else
 static inline bool directRipple(const display::RippleWave *, int) { return false; }
@@ -294,7 +292,7 @@ static void sweep_draw_cb(lv_event_t *e) {
             if (radius <= 0) continue;
             // A wide, faint halo behind the narrow bright edge gives a clearly
             // visible gradient without rasterising several separate trail rings.
-            glow.opa = (lv_opa_t)((float)coreOpa * 0.32f);
+            glow.opa = (lv_opa_t)((coreOpa * RIPPLE_GLOW_OPACITY_PERCENT) / 100);
             lv_draw_arc(dctx, &glow, &center, radius, 0, 360);
             wave.opa = coreOpa;
             lv_draw_arc(dctx, &wave, &center, radius, 0, 360);
