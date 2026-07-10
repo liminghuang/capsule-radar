@@ -38,7 +38,7 @@ static lv_color_t *s_rotBuf = nullptr;       // PSRAM scratch for 90/270° trans
 static lv_color_t *s_baseFrame = nullptr;    // PSRAM copy of the LVGL scene, without direct overlays
 static display::RippleWave s_oldRipple[2];
 static int s_oldRippleCount = 0;
-static lv_color_t s_line[SCREEN_W], s_rotLine[SCREEN_W];
+static lv_color_t s_line[SCREEN_W];
 static uint8_t s_dirty[SCREEN_W], s_alpha[SCREEN_W];
 
 // LVGL -> panel, applying the chosen rotation while pushing.
@@ -53,14 +53,6 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
     lv_color_t *out = px;
     int16_t  dx = area->x1, dy = area->y1;
     uint16_t dw = (uint16_t)w, dh = (uint16_t)h;
-
-    // Snapshot logical pixels before the 180-degree path reverses the buffer.
-    // Ripple composition always starts in this same logical coordinate system.
-    if (s_baseFrame) {
-        for (int row = 0; row < h; ++row)
-            memcpy(s_baseFrame + (area->y1 + row) * SCREEN_W + area->x1,
-                   px + row * w, (size_t)w * sizeof(lv_color_t));
-    }
 
     switch (s_rot) {
         case 2:  // 180°
@@ -87,6 +79,13 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
             }
             break;
         default: break;  // 0°
+    }
+    // The direct Ripple compositor needs an authoritative background to restore
+    // after moving a ring. Rotated modes deliberately stay on LVGL's path.
+    if (s_baseFrame && s_rot == 0) {
+        for (int row = 0; row < h; ++row)
+            memcpy(s_baseFrame + (area->y1 + row) * SCREEN_W + area->x1,
+                   px + row * w, (size_t)w * sizeof(lv_color_t));
     }
 #if (LV_COLOR_16_SWAP != 0)
     s_gfx->draw16bitBeRGBBitmap(dx, dy, (uint16_t *)out, dw, dh);
@@ -222,28 +221,8 @@ static void markRing(int16_t y, const RippleWave &wave, bool draw) {
     }
 }
 
-static void drawLogicalRun(int16_t x, int16_t y, int len) {
-    int16_t dx = x, dy = y;
-    uint16_t dw = (uint16_t)len, dh = 1;
-    lv_color_t *out = s_line;
-    if (s_rot == 1) {             // 90° CW: a logical row becomes a physical column
-        dx = SCREEN_H - 1 - y; dy = x; dw = 1; dh = (uint16_t)len;
-    } else if (s_rot == 2) {      // 180°: reverse both the run location and pixel order
-        for (int i = 0; i < len; ++i) s_rotLine[i] = s_line[len - 1 - i];
-        out = s_rotLine; dx = SCREEN_W - (x + len); dy = SCREEN_H - 1 - y;
-    } else if (s_rot == 3) {      // 270°: physical column with reverse pixel order
-        for (int i = 0; i < len; ++i) s_rotLine[i] = s_line[len - 1 - i];
-        out = s_rotLine; dx = y; dy = SCREEN_W - (x + len); dw = 1; dh = (uint16_t)len;
-    }
-#if (LV_COLOR_16_SWAP != 0)
-    s_gfx->draw16bitBeRGBBitmap(dx, dy, (uint16_t *)out, dw, dh);
-#else
-    s_gfx->draw16bitRGBBitmap(dx, dy, (uint16_t *)out, dw, dh);
-#endif
-}
-
 bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
-    if (!s_gfx || !s_baseFrame || !waves || count < 1 || count > 2) return false;
+    if (!s_gfx || !s_baseFrame || s_rot != 0 || !waves || count < 1 || count > 2) return false;
     const lv_color_t color = lv_color_hex(rgb);
     const int16_t yFirst = LV_MAX(0, SCREEN_CY - RIPPLE_R_OUTER_PX - RIPPLE_GLOW_WIDTH_PX);
     const int16_t yLast  = LV_MIN(SCREEN_H - 1, SCREEN_CY + RIPPLE_R_OUTER_PX + RIPPLE_GLOW_WIDTH_PX);
@@ -259,7 +238,13 @@ bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
                 s_line[x - start] = s_alpha[x] ? lv_color_mix(color, base, s_alpha[x]) : base;
                 ++x;
             }
-            if (x > start) drawLogicalRun((int16_t)start, y, x - start);
+            if (x > start) {
+#if (LV_COLOR_16_SWAP != 0)
+                s_gfx->draw16bitBeRGBBitmap(start, y, (uint16_t *)s_line, x - start, 1);
+#else
+                s_gfx->draw16bitRGBBitmap(start, y, (uint16_t *)s_line, x - start, 1);
+#endif
+            }
         }
     }
     s_oldRippleCount = count;

@@ -28,8 +28,7 @@ void setRotation(uint8_t quarters);
 uint8_t rotation();
 
 // Base scene captured from LVGL for the direct Ripple compositor; nullptr when
-// the PSRAM allocation failed. The compositor applies the active rotation when
-// it writes each logical line directly to the panel.
+// PSRAM allocation failed or when a rotated display mode is active.
 const uint16_t *baseFrame();
 bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb);
 void clearRippleOverlay();
