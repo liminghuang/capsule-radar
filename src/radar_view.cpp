@@ -140,10 +140,13 @@ static const float GY[4] = { -11.0f, 5.0f, 8.0f, 5.0f };
 static inline bool orb() { return s_theme == THEME_ORB; }
 static inline bool ripple() { return s_theme == THEME_RIPPLE; }
 #if defined(ESP_PLATFORM)
-static inline bool directRipple(const display::RippleWave *waves, int count) { return display::rippleOverlay(waves, count, s_phosphorScanRgb); }
-// Direct QSPI writes use the panel's native coordinate system. Rotated layouts
-// stay on the LVGL path, which already owns the correct transform.
+// directRipple() is gated on hasDirectRippleBase() so that s_sweep visibility
+// (which also depends on hasDirectRippleBase) and the compositor path are always
+// in sync: if the compositor runs, s_sweep is hidden; if not, LVGL arc runs.
 static inline bool hasDirectRippleBase() { return display::baseFrame() != nullptr && display::rotation() == 0; }
+static inline bool directRipple(const display::RippleWave *waves, int count) {
+    return hasDirectRippleBase() && display::rippleOverlay(waves, count, s_phosphorScanRgb);
+}
 static inline void clearDirectRipple() { display::clearRippleOverlay(); }
 #else
 static inline bool directRipple(const display::RippleWave *, int) { return false; }
@@ -416,26 +419,9 @@ static void sweep_timer_cb(lv_timer_t *t) {
                          rippleOpacity(phase, RIPPLE_CORE_OPACITY, RIPPLE_EDGE_OPACITY) };
         }
         if (directRipple(waves, RIPPLE_WAVES)) {
-            // Compositor active: track its frame rate separately from LVGL's
-            static uint32_t s_compFrames = 0, s_compReportMs = 0;
-            s_compFrames++;
-            const uint32_t cNow = lv_tick_get();
-            if (cNow - s_compReportMs >= 5000) {
-                Serial.printf("[ripple] compositor %.1f FPS (LVGL=aircraft only)\n",
-                              s_compFrames * 1000.0f / (float)(cNow - s_compReportMs));
-                s_compFrames = 0;
-                s_compReportMs = cNow;
-            }
             return;
         }
-        // Compositor not available (rotation != 0 or base frame unready).
-        // Log once so we know which path is active.
-        static bool s_pathLogged = false;
-        if (!s_pathLogged) {
-            s_pathLogged = true;
-            Serial.printf("[ripple] LVGL fallback (baseFrame=%p rot=%d)\n",
-                          display::baseFrame(), (int)display::rotation());
-        }
+        // Compositor not available; fall through to LVGL arc rendering.
         if (s_sweep) lv_obj_invalidate(s_sweep);
         return;
     }
