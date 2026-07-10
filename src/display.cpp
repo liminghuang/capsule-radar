@@ -232,17 +232,25 @@ bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
         for (int i = 0; i < count; ++i) markRing(y, waves[i], true);
         for (int x = 0; x < SCREEN_W;) {
             while (x < SCREEN_W && !s_dirty[x]) ++x;
-            const int start = x;
+            const int dirtyStart = x;
             while (x < SCREEN_W && s_dirty[x]) {
-                const lv_color_t base = s_baseFrame[y * SCREEN_W + x];
-                s_line[x - start] = s_alpha[x] ? lv_color_mix(color, base, s_alpha[x]) : base;
                 ++x;
             }
-            if (x > start) {
+            if (x > dirtyStart) {
+                // CO5300 only accepts even-x through odd-x partial windows.
+                // Include the extra edge pixels from the captured base scene so
+                // alignment never leaves a square notch in a short arc segment.
+                const int start = dirtyStart & ~1;
+                const int end = LV_MIN(SCREEN_W - 1, (x - 1) | 1);
+                for (int px = start; px <= end; ++px) {
+                    const lv_color_t base = s_baseFrame[y * SCREEN_W + px];
+                    s_line[px - start] = s_dirty[px] && s_alpha[px]
+                        ? lv_color_mix(color, base, s_alpha[px]) : base;
+                }
 #if (LV_COLOR_16_SWAP != 0)
-                s_gfx->draw16bitBeRGBBitmap(start, y, (uint16_t *)s_line, x - start, 1);
+                s_gfx->draw16bitBeRGBBitmap(start, y, (uint16_t *)s_line, end - start + 1, 1);
 #else
-                s_gfx->draw16bitRGBBitmap(start, y, (uint16_t *)s_line, x - start, 1);
+                s_gfx->draw16bitRGBBitmap(start, y, (uint16_t *)s_line, end - start + 1, 1);
 #endif
             }
         }
