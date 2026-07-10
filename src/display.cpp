@@ -8,11 +8,13 @@
 #include "radar_view.h"
 #include "ui.h"
 #include "touch_cst9217.h"
+#include "ripple_compositor.h"
 
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
 #include <esp_heap_caps.h>
+#include <string.h>
 
 // --- Arduino_GFX panel -------------------------------------------------------
 // Typed as Arduino_CO5300* (not Arduino_GFX*) so setBrightness() — declared on
@@ -33,6 +35,11 @@ uint32_t display_frames() { return s_frameCount; }
 
 static volatile uint8_t s_rot = 0;           // display rotation: 0/1/2/3 = 0°/90°/180°/270°
 static lv_color_t *s_rotBuf = nullptr;       // PSRAM scratch for 90/270° transpose (see begin())
+static lv_color_t *s_baseFrame = nullptr;    // PSRAM copy of the LVGL scene, without direct overlays
+static display::RippleWave s_oldRipple[2];
+static int s_oldRippleCount = 0;
+static lv_color_t s_line[SCREEN_W];
+static uint8_t s_dirty[SCREEN_W], s_alpha[SCREEN_W];
 
 // LVGL -> panel, applying the chosen rotation while pushing.
 //   0°   : straight through.
@@ -72,6 +79,14 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
             }
             break;
         default: break;  // 0°
+    }
+    // The direct Ripple compositor needs an authoritative background to restore
+    // after moving a ring. Capture the unrotated LVGL output while it is already
+    // in cache; rotated modes deliberately remain on the existing LVGL path.
+    if (s_baseFrame && s_rot == 0) {
+        for (int row = 0; row < h; ++row)
+            memcpy(s_baseFrame + (area->y1 + row) * SCREEN_W + area->x1,
+                   px + row * w, (size_t)w * sizeof(lv_color_t));
     }
 #if (LV_COLOR_16_SWAP != 0)
     s_gfx->draw16bitBeRGBBitmap(dx, dy, (uint16_t *)out, dw, dh);
@@ -148,6 +163,8 @@ bool begin() {
     // block the TLS handshake needs and break the ADS-B feed. NULL is fine (rotation just
     // falls back to un-rotated for 90/270° if PSRAM is exhausted).
     s_rotBuf = (lv_color_t *)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    s_baseFrame = (lv_color_t *)heap_caps_malloc((size_t)SCREEN_W * SCREEN_H * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    if (!s_baseFrame) Serial.println("[display] direct Ripple base frame unavailable");
 
     lv_disp_drv_init(&s_disp_drv);
     s_disp_drv.hor_res  = SCREEN_W;
@@ -182,6 +199,57 @@ void setRotation(uint8_t quarters) {
     if (scr) lv_obj_invalidate(scr);   // full repaint in the new orientation
 }
 uint8_t rotation() { return s_rot; }
+const uint16_t *baseFrame() { return (const uint16_t *)s_baseFrame; }
+
+static void markSpan(const RippleRowSpans &spans, bool draw, uint8_t alpha) {
+    const int16_t starts[2] = {spans.leftStart, spans.rightStart};
+    const int16_t ends[2] = {spans.leftEnd, spans.rightEnd};
+    for (int n = 0; n < 2; ++n) for (int x = starts[n]; x <= ends[n]; ++x) {
+        if (x < 0 || x >= SCREEN_W) continue;
+        s_dirty[x] = 1;
+        if (draw && alpha > s_alpha[x]) s_alpha[x] = alpha;
+    }
+}
+
+static void markRing(int16_t y, const RippleWave &wave, bool draw) {
+    const RippleRowSpans halo = rippleRowSpans(SCREEN_CX, SCREEN_CY, wave.radius, 8.0f, y, 0, SCREEN_W - 1);
+    if (halo.valid) markSpan(halo, draw, (uint8_t)(wave.opacity * 0.32f));
+    if (draw) {
+        const RippleRowSpans core = rippleRowSpans(SCREEN_CX, SCREEN_CY, wave.radius, 2.0f, y, 0, SCREEN_W - 1);
+        if (core.valid) markSpan(core, true, wave.opacity);
+    }
+}
+
+bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
+    if (!s_gfx || !s_baseFrame || s_rot != 0 || !waves || count < 1 || count > 2) return false;
+    const lv_color_t color = lv_color_hex(rgb);
+    for (int16_t y = SCREEN_CY - RADAR_R_OUTER_PX - 6; y <= SCREEN_CY + RADAR_R_OUTER_PX + 6; ++y) {
+        memset(s_dirty, 0, sizeof(s_dirty)); memset(s_alpha, 0, sizeof(s_alpha));
+        for (int i = 0; i < s_oldRippleCount; ++i) markRing(y, s_oldRipple[i], false);
+        for (int i = 0; i < count; ++i) markRing(y, waves[i], true);
+        for (int x = 0; x < SCREEN_W;) {
+            while (x < SCREEN_W && !s_dirty[x]) ++x;
+            const int start = x;
+            while (x < SCREEN_W && s_dirty[x]) {
+                const lv_color_t base = s_baseFrame[y * SCREEN_W + x];
+                s_line[x - start] = s_alpha[x] ? lv_color_mix(color, base, s_alpha[x]) : base;
+                ++x;
+            }
+            if (x > start) {
+#if (LV_COLOR_16_SWAP != 0)
+                s_gfx->draw16bitBeRGBBitmap(start, y, (uint16_t *)s_line, x - start, 1);
+#else
+                s_gfx->draw16bitRGBBitmap(start, y, (uint16_t *)s_line, x - start, 1);
+#endif
+            }
+        }
+    }
+    s_oldRippleCount = count;
+    for (int i = 0; i < count; ++i) s_oldRipple[i] = waves[i];
+    return true;
+}
+
+void clearRippleOverlay() { s_oldRippleCount = 0; }
 
 uint32_t inactiveMs() { return lv_disp_get_inactive_time(NULL); }
 

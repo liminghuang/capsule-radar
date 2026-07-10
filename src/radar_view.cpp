@@ -9,6 +9,7 @@
 #include "geo.h"
 #include "coastline.h"
 #include "airports.h"
+#include "display.h"
 #include <lvgl.h>
 #include <math.h>
 #include <stdio.h>
@@ -55,7 +56,7 @@
 #define SWEEP_TRAIL_STEPS 20
 #define SWEEP_TRAIL_OPA   72
 #define RIPPLE_PERIOD_MS  6000  // centre-to-rim travel; half the previous scan speed
-#define RIPPLE_FRAME_MS   120   // 6 s wave advances ~4 px/frame; avoids overloading the panel
+#define RIPPLE_FRAME_MS   40    // 25 FPS target; direct compositor updates only ring spans
 #define RIPPLE_WAVES      2   // a new wave starts when the previous one reaches half range
 #define RIPPLE_WIDTH      2
 #define RIPPLE_GLOW_WIDTH 8
@@ -137,6 +138,15 @@ static const float GY[4] = { -11.0f, 5.0f, 8.0f, 5.0f };
 
 static inline bool orb() { return s_theme == THEME_ORB; }
 static inline bool ripple() { return s_theme == THEME_RIPPLE; }
+#if defined(ESP_PLATFORM)
+static inline bool directRipple(const display::RippleWave *waves, int count) { return display::rippleOverlay(waves, count, s_phosphorScanRgb); }
+static inline bool hasDirectRippleBase() { return display::baseFrame() != nullptr; }
+static inline void clearDirectRipple() { display::clearRippleOverlay(); }
+#else
+static inline bool directRipple(const display::RippleWave *, int) { return false; }
+static inline bool hasDirectRippleBase() { return false; }
+static inline void clearDirectRipple() {}
+#endif
 
 static float ripple_phase(float base, int wave) {
     float phase = base - (float)wave / (float)RIPPLE_WAVES;
@@ -409,6 +419,13 @@ static void sweep_timer_cb(lv_timer_t *t) {
         s_prevRipplePhase = s_ripplePhase;
         s_ripplePhase += (float)elapsed / (float)RIPPLE_PERIOD_MS;
         while (s_ripplePhase >= 1.0f) s_ripplePhase -= 1.0f;
+        display::RippleWave waves[RIPPLE_WAVES];
+        for (int i = 0; i < RIPPLE_WAVES; ++i) {
+            const float phase = ripple_phase(s_ripplePhase, i);
+            waves[i] = { phase * (float)RADAR_R_OUTER_PX,
+                         (uint8_t)(220.0f * (1.0f - 0.9f * phase)) };
+        }
+        if (directRipple(waves, RIPPLE_WAVES)) return;
         if (s_sweep) {
             lv_area_t oldArea, newArea;
             ripple_bbox(s_prevRipplePhase, &oldArea);
@@ -648,6 +665,7 @@ void setTheme(int t) {
     show(s_rangeLbl, !drg && s_rangeLblVisible);
     show(s_centerDot, !drg);                             // orb draws an orange triangle instead
     show(s_pulse, !drg);
+    show(s_sweep, s_sweepEnabled && !(ripple() && hasDirectRippleBase()));
 
     // retint the persistent chrome objects for the active palette
     if (s_rose[0]) lv_obj_set_style_text_color(s_rose[0], s_cInk, 0);
@@ -675,7 +693,8 @@ void setSweepEnabled(bool on) {
     s_sweepEnabled = on;
     if (on && ripple()) { s_lastRippleMs = lv_tick_get(); s_lastRippleFrameMs = 0; }
     if (s_sweep) {
-        show(s_sweep, on);
+        if (!on) clearDirectRipple();
+        show(s_sweep, on && !(ripple() && hasDirectRippleBase()));
         if (!on) lv_obj_invalidate(s_sweep);   // clear any wedge currently painted
     }
 }

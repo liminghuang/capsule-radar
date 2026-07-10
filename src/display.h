@@ -6,6 +6,8 @@
 
 namespace display {
 
+struct RippleWave { float radius; uint8_t opacity; };
+
 // Init the panel and LVGL (draw buffers in PSRAM) and show the M0 hello screen.
 // Returns false if the panel failed to initialize.
 bool begin();
@@ -24,6 +26,12 @@ uint32_t inactiveMs();
 // scratch buffer) and mirrored on touch input.
 void setRotation(uint8_t quarters);
 uint8_t rotation();
+
+// Base scene captured from LVGL for the direct Ripple compositor; nullptr when
+// PSRAM allocation failed or when a rotated display mode is active.
+const uint16_t *baseFrame();
+bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb);
+void clearRippleOverlay();
 
 } // namespace display
 
