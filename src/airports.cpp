@@ -38,12 +38,13 @@ void airports_project(double homeLat, double homeLon, double rangeKm,
     }
 }
 
-void airports_draw(lv_draw_ctx_t *ctx, lv_color_t color, lv_opa_t opa) {
+void airports_draw(lv_layer_t *layer, lv_color_t color, lv_opa_t opa) {
     if (s_apts.empty()) return;
 
     lv_draw_arc_dsc_t ring;
     lv_draw_arc_dsc_init(&ring);
     ring.color = color; ring.width = 2; ring.opa = opa;
+    ring.radius = 3; ring.start_angle = 0; ring.end_angle = 360;
 
     lv_draw_rect_dsc_t dot;
     lv_draw_rect_dsc_init(&dot);
@@ -55,16 +56,18 @@ void airports_draw(lv_draw_ctx_t *ctx, lv_color_t color, lv_opa_t opa) {
 
     for (const Apt &ap : s_apts) {
         if (ap.large) {
-            lv_draw_arc(ctx, &ring, &ap.pos, 3, 0, 360);                    // small hollow ring
+            ring.center = ap.pos;                                            // center now in dsc
+            lv_draw_arc(layer, &ring);
             if (ap.iata[0]) {
-                lv_area_t la = { (lv_coord_t)(ap.pos.x + 5), (lv_coord_t)(ap.pos.y - 7),
-                                 (lv_coord_t)(ap.pos.x + 44), (lv_coord_t)(ap.pos.y + 7) };
-                lv_draw_label(ctx, &lbl, &la, ap.iata, NULL);
+                lv_area_t la = { (int32_t)(ap.pos.x + 5), (int32_t)(ap.pos.y - 7),
+                                 (int32_t)(ap.pos.x + 44), (int32_t)(ap.pos.y + 7) };
+                lbl.text = ap.iata;                                          // text now in dsc
+                lv_draw_label(layer, &lbl, &la);
             }
         } else {
-            lv_area_t d = { (lv_coord_t)(ap.pos.x - 1), (lv_coord_t)(ap.pos.y - 1),
-                            (lv_coord_t)(ap.pos.x + 1), (lv_coord_t)(ap.pos.y + 1) };
-            lv_draw_rect(ctx, &dot, &d);                                    // faint dot
+            lv_area_t d = { (int32_t)(ap.pos.x - 1), (int32_t)(ap.pos.y - 1),
+                            (int32_t)(ap.pos.x + 1), (int32_t)(ap.pos.y + 1) };
+            lv_draw_rect(layer, &dot, &d);
         }
     }
 }

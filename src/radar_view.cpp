@@ -196,13 +196,18 @@ static inline lv_point_t rot_pt(float px, float py, float deg, lv_coord_t ox, lv
 // =============================== flow map ====================================
 static void flow_draw_seg(const FlowSeg &s) {
     if (!s_flowCanvas) return;
+    // v9: lv_canvas_draw_line removed; use lv_canvas_init_layer + lv_draw_line.
+    lv_layer_t layer;
+    lv_canvas_init_layer(s_flowCanvas, &layer);
     lv_draw_line_dsc_t d;
     lv_draw_line_dsc_init(&d);
     d.color = orb() ? ORB_FLOW : s_cRing;
     d.width = 2;
     d.opa = FLOW_OPA;
-    lv_point_t pts[2] = { s.a, s.b };
-    lv_canvas_draw_line(s_flowCanvas, pts, 2, &d);
+    d.p1.x = (lv_value_precise_t)s.a.x; d.p1.y = (lv_value_precise_t)s.a.y;
+    d.p2.x = (lv_value_precise_t)s.b.x; d.p2.y = (lv_value_precise_t)s.b.y;
+    lv_draw_line(&layer, &d);
+    lv_canvas_finish_layer(s_flowCanvas, &layer);
 }
 
 static void flow_redraw_all(void) {
@@ -212,8 +217,32 @@ static void flow_redraw_all(void) {
 }
 
 // =============================== grid ========================================
+// Helper: draw a line (p1/p2 now inside dsc in v9)
+static inline void draw_line(lv_layer_t *layer, lv_draw_line_dsc_t *d,
+                              lv_coord_t x1, lv_coord_t y1, lv_coord_t x2, lv_coord_t y2) {
+    d->p1.x = (lv_value_precise_t)x1; d->p1.y = (lv_value_precise_t)y1;
+    d->p2.x = (lv_value_precise_t)x2; d->p2.y = (lv_value_precise_t)y2;
+    lv_draw_line(layer, d);
+}
+// Helper: draw a full-circle arc (center/radius/angles now inside dsc in v9)
+static inline void draw_arc(lv_layer_t *layer, lv_draw_arc_dsc_t *d,
+                             const lv_point_t &center, uint16_t radius) {
+    d->center = center;
+    d->radius = radius;
+    d->start_angle = 0; d->end_angle = 360;
+    lv_draw_arc(layer, d);
+}
+static inline void draw_arc_a(lv_layer_t *layer, lv_draw_arc_dsc_t *d,
+                               const lv_point_t &center, uint16_t radius,
+                               lv_value_precise_t start, lv_value_precise_t end) {
+    d->center = center;
+    d->radius = radius;
+    d->start_angle = start; d->end_angle = end;
+    lv_draw_arc(layer, d);
+}
+
 static void grid_draw_cb(lv_event_t *e) {
-    lv_draw_ctx_t *d = lv_event_get_draw_ctx(e);
+    lv_layer_t *d = lv_event_get_layer(e);
     const lv_point_t c = { s_cx, s_cy };
 
     if (orb()) {
@@ -223,33 +252,29 @@ static void grid_draw_cb(lv_event_t *e) {
         gl.width = 1;
         gl.opa = 120;
         const int step = 38;
-        for (int x = s_cx % step; x < SCREEN_W; x += step) {
-            lv_point_t p1 = { (lv_coord_t)x, 0 }, p2 = { (lv_coord_t)x, SCREEN_H - 1 };
-            lv_draw_line(d, &gl, &p1, &p2);
-        }
-        for (int y = s_cy % step; y < SCREEN_H; y += step) {
-            lv_point_t p1 = { 0, (lv_coord_t)y }, p2 = { SCREEN_W - 1, (lv_coord_t)y };
-            lv_draw_line(d, &gl, &p1, &p2);
-        }
+        for (int x = s_cx % step; x < SCREEN_W; x += step)
+            draw_line(d, &gl, (lv_coord_t)x, 0, (lv_coord_t)x, SCREEN_H - 1);
+        for (int y = s_cy % step; y < SCREEN_H; y += step)
+            draw_line(d, &gl, 0, (lv_coord_t)y, SCREEN_W - 1, (lv_coord_t)y);
+
         // center "you are here" triangle (orange, pointing up)
         lv_point_t tri[3] = { rot_pt(0, -11, 0, s_cx, s_cy),
                               rot_pt(10, 8, 0, s_cx, s_cy),
                               rot_pt(-10, 8, 0, s_cx, s_cy) };
-        lv_draw_rect_dsc_t td;
-        lv_draw_rect_dsc_init(&td);
-        td.bg_color = ORB_ACCENT;
-        td.bg_opa = LV_OPA_COVER;
-        td.border_color = lv_color_hex(0x8A4A00);
-        td.border_width = 1;
-        td.border_opa = 160;
-        coastline_draw(d, COAST_COLOR, 170, 2);    // landmass outline under the triangle
+        coastline_draw(d, COAST_COLOR, 170, 2);
         if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 150);
-        lv_draw_polygon(d, &td, tri, 3);
+        // v9: lv_draw_polygon removed; use lv_draw_triangle for 3-point shapes
+        lv_draw_triangle_dsc_t td;
+        lv_draw_triangle_dsc_init(&td);
+        td.color = ORB_ACCENT;
+        td.opa = LV_OPA_COVER;
+        td.p[0] = { (lv_value_precise_t)tri[0].x, (lv_value_precise_t)tri[0].y };
+        td.p[1] = { (lv_value_precise_t)tri[1].x, (lv_value_precise_t)tri[1].y };
+        td.p[2] = { (lv_value_precise_t)tri[2].x, (lv_value_precise_t)tri[2].y };
+        lv_draw_triangle(d, &td);
         return;
     }
 
-    // coastline first, so the rings/crosshair sit cleanly on top of it.
-    // Steel blue + 2 px so it reads as a map outline, distinct from the green altitude trails.
     coastline_draw(d, COAST_COLOR, 165, 2);
     if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 150);
 
@@ -258,25 +283,21 @@ static void grid_draw_cb(lv_event_t *e) {
     lv_draw_arc_dsc_init(&ad);
     ad.color = s_cRing;
     ad.width = 2;
-    const lv_coord_t rr[4] = { 50, 104, 160, RADAR_R_OUTER_PX };
-    const lv_opa_t   ro[4] = { 66, 66, 66, 87 };
-    for (int i = 0; i < 4; ++i) { ad.opa = ro[i]; lv_draw_arc(d, &ad, &c, rr[i], 0, 360); }
+    const uint16_t rr[4] = { 50, 104, 160, RADAR_R_OUTER_PX };
+    const lv_opa_t ro[4] = { 66, 66, 66, 87 };
+    for (int i = 0; i < 4; ++i) { ad.opa = ro[i]; draw_arc(d, &ad, c, rr[i]); }
 
     lv_draw_line_dsc_t ll;
     lv_draw_line_dsc_init(&ll);
-    ll.color = s_cRing;
-    ll.width = 2;
-    ll.opa = 41;
-    lv_point_t h1 = { (lv_coord_t)(s_cx - 211), s_cy }, h2 = { (lv_coord_t)(s_cx + 211), s_cy };
-    lv_point_t v1 = { s_cx, (lv_coord_t)(s_cy - 211) }, v2 = { s_cx, (lv_coord_t)(s_cy + 211) };
-    lv_draw_line(d, &ll, &h1, &h2);
-    lv_draw_line(d, &ll, &v1, &v2);
+    ll.color = s_cRing; ll.width = 2; ll.opa = 41;
+    draw_line(d, &ll, s_cx - 211, s_cy, s_cx + 211, s_cy);
+    draw_line(d, &ll, s_cx, s_cy - 211, s_cx, s_cy + 211);
 }
 
 // =============================== sweep =======================================
 static void sweep_draw_cb(lv_event_t *e) {
     if (orb()) return;
-    lv_draw_ctx_t *dctx = lv_event_get_draw_ctx(e);
+    lv_layer_t *dctx = lv_event_get_layer(e);
     const lv_point_t center = { s_cx, s_cy };
     const float R = ripple() ? (float)RIPPLE_R_OUTER_PX : (float)RADAR_R_OUTER_PX;
 
@@ -290,46 +311,38 @@ static void sweep_draw_cb(lv_event_t *e) {
             const float phase = ripple_phase(s_ripplePhase, i);
             const lv_opa_t coreOpa = (lv_opa_t)rippleOpacity(
                 phase, RIPPLE_CORE_OPACITY, RIPPLE_EDGE_OPACITY);
-            const lv_coord_t radius = (lv_coord_t)(phase * R);
-            if (radius <= 0) continue;
-            // Wide, faint halo gives a visible gradient without multiple trail rings.
+            const uint16_t radius = (uint16_t)(phase * R);
+            if (radius == 0) continue;
 #if RIPPLE_GLOW_WIDTH_PX > 0
             lv_draw_arc_dsc_t glow;
             lv_draw_arc_dsc_init(&glow);
             glow.color = s_cLead;
             glow.width = RIPPLE_GLOW_WIDTH;
             glow.opa = (lv_opa_t)((coreOpa * RIPPLE_GLOW_OPACITY_PERCENT) / 100);
-            lv_draw_arc(dctx, &glow, &center, radius, 0, 360);
+            draw_arc(dctx, &glow, center, radius);
 #endif
             wave.opa = coreOpa;
-            lv_draw_arc(dctx, &wave, &center, radius, 0, 360);
+            draw_arc(dctx, &wave, center, radius);
         }
         return;
     }
 
     lv_draw_line_dsc_t ld;
     lv_draw_line_dsc_init(&ld);
-    ld.color = s_cLead;
-    ld.width = 5;
-    ld.round_start = 1;
-    ld.round_end = 1;
+    ld.color = s_cLead; ld.width = 5; ld.round_start = 1; ld.round_end = 1;
     for (int i = SWEEP_TRAIL_STEPS; i >= 1; --i) {
         const float frac = 1.0f - (float)i / (float)SWEEP_TRAIL_STEPS;
         const float ang  = s_sweepDeg - (float)i * (SWEEP_TRAIL_DEG / (float)SWEEP_TRAIL_STEPS);
         ld.opa = (lv_opa_t)(frac * frac * (float)SWEEP_TRAIL_OPA);
         if (ld.opa < 2) continue;
         lv_point_t p2 = rim_point(ang, R);
-        lv_draw_line(dctx, &ld, &center, &p2);
+        draw_line(dctx, &ld, center.x, center.y, p2.x, p2.y);
     }
     lv_draw_line_dsc_t le;
     lv_draw_line_dsc_init(&le);
-    le.color = s_cLead;
-    le.width = 2;
-    le.opa = 217;
-    le.round_start = 1;
-    le.round_end = 1;
+    le.color = s_cLead; le.width = 2; le.opa = 217; le.round_start = 1; le.round_end = 1;
     lv_point_t lead = rim_point(s_sweepDeg, R);
-    lv_draw_line(dctx, &le, &center, &lead);
+    draw_line(dctx, &le, center.x, center.y, lead.x, lead.y);
 }
 
 static void wedge_bbox(float deg, lv_area_t *out) {
@@ -440,7 +453,7 @@ static void sweep_timer_cb(lv_timer_t *t) {
 }
 
 // =============================== aircraft ====================================
-static void draw_trail(lv_draw_ctx_t *d, const AcDraw &ac, lv_color_t col) {
+static void draw_trail(lv_layer_t *d, const AcDraw &ac, lv_color_t col) {
     const int n = (int)ac.trail.size();
     if (n < 2) return;
     lv_draw_line_dsc_t t;
@@ -449,111 +462,104 @@ static void draw_trail(lv_draw_ctx_t *d, const AcDraw &ac, lv_color_t col) {
     t.width = 2;
     for (int i = 1; i < n; ++i) {
         t.opa = (lv_opa_t)(10 + 45 * i / n);
-        lv_point_t a = ac.trail[i - 1], b = ac.trail[i];
-        lv_draw_line(d, &t, &a, &b);
+        draw_line(d, &t, ac.trail[i-1].x, ac.trail[i-1].y, ac.trail[i].x, ac.trail[i].y);
     }
 }
 
-static void draw_ball(lv_draw_ctx_t *d, const AcDraw &ac) {
-    // emitted waves: several expanding rings (sonar-ping look)
+static void draw_ball(lv_layer_t *d, const AcDraw &ac) {
     lv_draw_arc_dsc_t w;
     lv_draw_arc_dsc_init(&w);
-    w.color = ORB_ACCENT;
-    w.width = 3;
+    w.color = ORB_ACCENT; w.width = 3;
     for (int wv = 0; wv < 3; ++wv) {
         float ph = s_wavePhase + (float)wv * 0.34f;
         if (ph >= 1.0f) ph -= 1.0f;
         w.opa = (lv_opa_t)((1.0f - ph) * 245.0f);
-        if (w.opa > 6) lv_draw_arc(d, &w, &ac.pos, (uint16_t)(BALL_R + 3 + ph * WAVE_EXPAND), 0, 360);
+        if (w.opa > 6) draw_arc(d, &w, ac.pos, (uint16_t)(BALL_R + 3 + ph * WAVE_EXPAND));
     }
 
-    // the ball
     lv_draw_rect_dsc_t b;
     lv_draw_rect_dsc_init(&b);
     b.bg_color = ac.emergency ? ORB_EMERG : ORB_BLIP;
-    b.bg_opa = LV_OPA_COVER;
-    b.radius = LV_RADIUS_CIRCLE;
-    b.border_color = lv_color_hex(0x7A5A00);
-    b.border_width = 1;
-    b.border_opa = 150;
-    lv_area_t r = { (lv_coord_t)(ac.pos.x - BALL_R), (lv_coord_t)(ac.pos.y - BALL_R),
-                    (lv_coord_t)(ac.pos.x + BALL_R), (lv_coord_t)(ac.pos.y + BALL_R) };
+    b.bg_opa = LV_OPA_COVER; b.radius = LV_RADIUS_CIRCLE;
+    b.border_color = lv_color_hex(0x7A5A00); b.border_width = 1; b.border_opa = 150;
+    lv_area_t r = { (int32_t)(ac.pos.x - BALL_R), (int32_t)(ac.pos.y - BALL_R),
+                    (int32_t)(ac.pos.x + BALL_R), (int32_t)(ac.pos.y + BALL_R) };
     lv_draw_rect(d, &b, &r);
 
-    // glossy highlight
     lv_draw_rect_dsc_t hl;
     lv_draw_rect_dsc_init(&hl);
-    hl.bg_color = lv_color_hex(0xFFFBCC);
-    hl.bg_opa = 170;
-    hl.radius = LV_RADIUS_CIRCLE;
-    lv_area_t hr = { (lv_coord_t)(ac.pos.x - 5), (lv_coord_t)(ac.pos.y - 6),
-                     (lv_coord_t)(ac.pos.x - 1), (lv_coord_t)(ac.pos.y - 2) };
+    hl.bg_color = lv_color_hex(0xFFFBCC); hl.bg_opa = 170; hl.radius = LV_RADIUS_CIRCLE;
+    lv_area_t hr = { (int32_t)(ac.pos.x - 5), (int32_t)(ac.pos.y - 6),
+                     (int32_t)(ac.pos.x - 1), (int32_t)(ac.pos.y - 2) };
     lv_draw_rect(d, &hl, &hr);
 }
 
-static void draw_offrange(lv_draw_ctx_t *d, const AcDraw &ac) {
-    // small ball at the rim
+static void draw_offrange(lv_layer_t *d, const AcDraw &ac) {
     lv_draw_rect_dsc_t b;
     lv_draw_rect_dsc_init(&b);
     b.bg_color = ac.emergency ? ORB_EMERG : ORB_BLIP;
-    b.bg_opa = LV_OPA_COVER;
-    b.radius = LV_RADIUS_CIRCLE;
-    lv_area_t r = { (lv_coord_t)(ac.pos.x - 5), (lv_coord_t)(ac.pos.y - 5),
-                    (lv_coord_t)(ac.pos.x + 5), (lv_coord_t)(ac.pos.y + 5) };
+    b.bg_opa = LV_OPA_COVER; b.radius = LV_RADIUS_CIRCLE;
+    lv_area_t r = { (int32_t)(ac.pos.x - 5), (int32_t)(ac.pos.y - 5),
+                    (int32_t)(ac.pos.x + 5), (int32_t)(ac.pos.y + 5) };
     lv_draw_rect(d, &b, &r);
 
-    // small orange triangle just outside it, pointing toward the aircraft's bearing
-    const lv_coord_t ox = (lv_coord_t)lroundf(ac.pos.x + 12.0f * sinf(ac.bearingDeg * (float)M_PI / 180.0f));
-    const lv_coord_t oy = (lv_coord_t)lroundf(ac.pos.y - 12.0f * cosf(ac.bearingDeg * (float)M_PI / 180.0f));
+    const int32_t ox = (int32_t)lroundf(ac.pos.x + 12.0f * sinf(ac.bearingDeg * (float)M_PI / 180.0f));
+    const int32_t oy = (int32_t)lroundf(ac.pos.y - 12.0f * cosf(ac.bearingDeg * (float)M_PI / 180.0f));
     lv_point_t tri[3] = { rot_pt(0, -7, ac.bearingDeg, ox, oy),
                           rot_pt(5, 4, ac.bearingDeg, ox, oy),
                           rot_pt(-5, 4, ac.bearingDeg, ox, oy) };
-    lv_draw_rect_dsc_t td;
-    lv_draw_rect_dsc_init(&td);
-    td.bg_color = ORB_ACCENT;
-    td.bg_opa = LV_OPA_COVER;
-    lv_draw_polygon(d, &td, tri, 3);
+    lv_draw_triangle_dsc_t td;
+    lv_draw_triangle_dsc_init(&td);
+    td.color = ORB_ACCENT; td.opa = LV_OPA_COVER;
+    td.p[0] = {(lv_value_precise_t)tri[0].x, (lv_value_precise_t)tri[0].y};
+    td.p[1] = {(lv_value_precise_t)tri[1].x, (lv_value_precise_t)tri[1].y};
+    td.p[2] = {(lv_value_precise_t)tri[2].x, (lv_value_precise_t)tri[2].y};
+    lv_draw_triangle(d, &td);
 }
 
 static void ac_draw_cb(lv_event_t *e) {
-    lv_draw_ctx_t *d = lv_event_get_draw_ctx(e);
+    lv_layer_t *d = lv_event_get_layer(e);
     const bool drg = orb();
     int balls = 0, arrows = 0;
 
     for (const AcDraw &ac : s_acs) {
         if (drg) {
             if (ac.inRange) {
-                if (balls >= ORB_BLIPS) continue;   // up to 7 in-range balls
+                if (balls >= ORB_BLIPS) continue;
                 draw_trail(d, ac, ORB_FLOW);
                 draw_ball(d, ac);
                 balls++;
             } else {
-                if (arrows >= ORB_ARROWS) continue;  // up to 8 off-range arrows
+                if (arrows >= ORB_ARROWS) continue;
                 draw_offrange(d, ac);
                 arrows++;
             }
         } else {
-            if (!ac.inRange) continue;            // phosphor shows in-range traffic only
+            if (!ac.inRange) continue;
             draw_trail(d, ac, ac.color);
             const float th = ((ac.track != ac.track) ? 0.0f : ac.track) * (float)M_PI / 180.0f;
             const float c = cosf(th), s = sinf(th);
             lv_point_t pts[4];
             for (int i = 0; i < 4; ++i) {
-                const float x = GX[i] * c - GY[i] * s;
-                const float y = GX[i] * s + GY[i] * c;
-                pts[i].x = (lv_coord_t)(ac.pos.x + (lv_coord_t)lroundf(x));
-                pts[i].y = (lv_coord_t)(ac.pos.y + (lv_coord_t)lroundf(y));
+                pts[i].x = (int32_t)(ac.pos.x + lroundf(GX[i] * c - GY[i] * s));
+                pts[i].y = (int32_t)(ac.pos.y + lroundf(GX[i] * s + GY[i] * c));
             }
-            lv_draw_rect_dsc_t g;
-            lv_draw_rect_dsc_init(&g);
-            g.bg_color = ac.color;
-            g.bg_opa = LV_OPA_COVER;
-            lv_draw_polygon(d, &g, pts, 4);
+            // v9: lv_draw_polygon removed; split 4-pt glyph into 2 triangles
+            lv_draw_triangle_dsc_t g;
+            lv_draw_triangle_dsc_init(&g);
+            g.color = ac.color; g.opa = LV_OPA_COVER;
+            g.p[0] = {(lv_value_precise_t)pts[0].x, (lv_value_precise_t)pts[0].y};
+            g.p[1] = {(lv_value_precise_t)pts[1].x, (lv_value_precise_t)pts[1].y};
+            g.p[2] = {(lv_value_precise_t)pts[2].x, (lv_value_precise_t)pts[2].y};
+            lv_draw_triangle(d, &g);
+            g.p[1] = g.p[2];
+            g.p[2] = {(lv_value_precise_t)pts[3].x, (lv_value_precise_t)pts[3].y};
+            lv_draw_triangle(d, &g);
             if (ac.emergency) {
                 lv_draw_arc_dsc_t h;
                 lv_draw_arc_dsc_init(&h);
                 h.color = COL_EMERG; h.width = 2; h.opa = 200;
-                lv_draw_arc(d, &h, &ac.pos, 16, 0, 360);
+                draw_arc(d, &h, ac.pos, 16);
             }
         }
 
@@ -561,33 +567,30 @@ static void ac_draw_cb(lv_event_t *e) {
         if (!s_selHex.empty() && s_selHex == ac.hex) {
             lv_draw_arc_dsc_t sr;
             lv_draw_arc_dsc_init(&sr);
-            sr.width = 2;
-            sr.opa = 240;
+            sr.width = 2; sr.opa = 240;
             if (drg) {
                 sr.color = ORB_ACCENT;
-                lv_draw_arc(d, &sr, &ac.pos, 15, 0, 360);
-                lv_draw_arc(d, &sr, &ac.pos, 23, 0, 360);
+                draw_arc(d, &sr, ac.pos, 15);
+                draw_arc(d, &sr, ac.pos, 23);
             } else {
                 sr.color = ac.emergency ? COL_EMERG : s_cInk;
-                lv_draw_arc(d, &sr, &ac.pos, 19, 0, 360);
+                draw_arc(d, &sr, ac.pos, 19);
             }
         }
 
-        // floating labels (phosphor only; orb keeps clean balls + the tap card)
+        // floating labels (phosphor only)
         if (!drg) {
             lv_draw_label_dsc_t lc;
             lv_draw_label_dsc_init(&lc);
-            lc.font = &lv_font_montserrat_14;
-            lc.color = s_cInk;
-            lv_area_t a1 = { (lv_coord_t)(ac.pos.x + 12), (lv_coord_t)(ac.pos.y - 14),
-                             (lv_coord_t)(ac.pos.x + 142), (lv_coord_t)(ac.pos.y + 2) };
-            if (ac.call[0]) lv_draw_label(d, &lc, &a1, ac.call, NULL);
+            lc.font = &lv_font_montserrat_14; lc.color = s_cInk;
+            lv_area_t a1 = { (int32_t)(ac.pos.x + 12), (int32_t)(ac.pos.y - 14),
+                             (int32_t)(ac.pos.x + 142), (int32_t)(ac.pos.y + 2) };
+            if (ac.call[0]) { lc.text = ac.call; lv_draw_label(d, &lc, &a1); }
             lv_draw_label_dsc_t la;
             lv_draw_label_dsc_init(&la);
-            la.font = &lv_font_montserrat_12;
-            la.color = ac.color;
-            lv_area_t a2 = { a1.x1, (lv_coord_t)(ac.pos.y + 2), a1.x2, (lv_coord_t)(ac.pos.y + 20) };
-            if (ac.altTxt[0]) lv_draw_label(d, &la, &a2, ac.altTxt, NULL);
+            la.font = &lv_font_montserrat_12; la.color = ac.color;
+            lv_area_t a2 = { a1.x1, (int32_t)(ac.pos.y + 2), a1.x2, (int32_t)(ac.pos.y + 20) };
+            if (ac.altTxt[0]) { la.text = ac.altTxt; lv_draw_label(d, &la, &a2); }
         }
     }
 }
@@ -608,7 +611,7 @@ static lv_obj_t *make_layer(lv_obj_t *parent, lv_event_cb_t draw_cb) {
     lv_obj_remove_style_all(o);
     lv_obj_set_size(o, SCREEN_W, SCREEN_H);
     lv_obj_center(o);
-    lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(o, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
     if (draw_cb) lv_obj_add_event_cb(o, draw_cb, LV_EVENT_DRAW_MAIN, nullptr);
     return o;
 }
@@ -725,7 +728,9 @@ void init(void *lv_parent) {
     lv_obj_clear_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
 
     if (!s_flowBuf) {
-        const size_t sz = LV_CANVAS_BUF_SIZE_TRUE_COLOR_ALPHA(SCREEN_W, SCREEN_H);
+        // 16-bit RGB565 — matches LV_COLOR_DEPTH 16 and avoids large ARGB8888 buffer.
+        // ARGB8888 would be 466×466×4 = 868 KB, leaving no room for audio/WiFi.
+        const size_t sz = LV_CANVAS_BUF_SIZE(SCREEN_W, SCREEN_H, 16, LV_DRAW_BUF_ALIGN);
 #if defined(ESP_PLATFORM)
         s_flowBuf = (lv_color_t *)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
 #else
@@ -733,9 +738,9 @@ void init(void *lv_parent) {
 #endif
     }
     s_flowCanvas = lv_canvas_create(parent);
-    lv_obj_clear_flag(s_flowCanvas, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_flowCanvas, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
     if (s_flowBuf) {
-        lv_canvas_set_buffer(s_flowCanvas, s_flowBuf, SCREEN_W, SCREEN_H, LV_IMG_CF_TRUE_COLOR_ALPHA);
+        lv_canvas_set_buffer(s_flowCanvas, s_flowBuf, SCREEN_W, SCREEN_H, LV_COLOR_FORMAT_RGB565);
         lv_canvas_fill_bg(s_flowCanvas, lv_color_black(), LV_OPA_TRANSP);
     }
     lv_obj_center(s_flowCanvas);
@@ -762,7 +767,7 @@ void init(void *lv_parent) {
     lv_obj_set_style_bg_opa(s_pulse, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_color(s_pulse, COL_INK, 0);
     lv_obj_set_style_border_width(s_pulse, 2, 0);
-    lv_obj_clear_flag(s_pulse, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_pulse, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, s_pulse);
@@ -779,7 +784,7 @@ void init(void *lv_parent) {
     lv_obj_set_style_radius(s_centerDot, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(s_centerDot, COL_INK, 0);
     lv_obj_set_style_bg_opa(s_centerDot, LV_OPA_COVER, 0);
-    lv_obj_clear_flag(s_centerDot, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_centerDot, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
 
     s_sweepDeg = 0.0f;
     s_prevSweepDeg = 0.0f;

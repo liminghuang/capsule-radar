@@ -26,7 +26,7 @@ static bool jpg_out(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bmp)
         for (int i = 0; i < w; ++i) {
             const int xx = x + i;
             if (xx < 0 || xx >= s_dstW) continue;
-            s_dst[yy * s_dstW + xx].full = bmp[j * w + i];   // RGB565 -> lv_color_t
+            memcpy(&s_dst[yy * s_dstW + xx], &bmp[j * w + i], 2);   // RGB565 -> lv_color_t
         }
     }
     return true;
@@ -159,7 +159,7 @@ bool photo_fetch(const char *hex) {
     s_dstW = (int)(jw / scale); if (s_dstW > maxW) s_dstW = maxW;
     s_dstH = (int)(jh / scale); if (s_dstH > maxH) s_dstH = maxH;
     s_dst = dst;
-    for (int i = 0; i < s_dstW * s_dstH; ++i) s_dst[i].full = 0;   // clear
+    for (int i = 0; i < s_dstW * s_dstH; ++i) memset(&s_dst[i], 0, sizeof(lv_color_t));   // clear
 
     TJpgDec.setJpgScale(scale);
     TJpgDec.setSwapBytes(false);

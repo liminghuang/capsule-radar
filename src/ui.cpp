@@ -148,7 +148,7 @@ static void refresh_card(void) {
     if (s_photo && in.hex[0] && photo_get(in.hex, &pw, &ph, pcred, sizeof(pcred)) && pw > 0 && ph > 0) {
         int mw, mh;
         lv_color_t *pbuf = photo_buffer(&mw, &mh);
-        lv_canvas_set_buffer(s_photo, pbuf, pw, ph, LV_IMG_CF_TRUE_COLOR);
+        lv_canvas_set_buffer(s_photo, pbuf, pw, ph, LV_COLOR_FORMAT_RGB565);
         lv_obj_set_size(s_photo, pw, ph);
         lv_obj_align(s_photo, LV_ALIGN_CENTER, 0, -28 - ph / 2);   // sit lower: fill the band down to the card
         lv_obj_clear_flag(s_photo, LV_OBJ_FLAG_HIDDEN);
@@ -228,7 +228,7 @@ static void radar_clicked_cb(lv_event_t *e) {
 }
 
 static void list_btn_cb(lv_event_t *e) {
-    lv_obj_t *b = lv_event_get_target(e);
+    lv_obj_t *b = (lv_obj_t *)lv_event_get_target(e);
     const int idx = (int)(intptr_t)lv_obj_get_user_data(b);
     radar::select(idx);
     refresh_card();
@@ -455,7 +455,7 @@ static void splash_fade_cb(void *obj, int32_t v) { lv_obj_set_style_opa((lv_obj_
 static void splash_del_cb(lv_anim_t *a) { lv_obj_del((lv_obj_t *)a->var); }
 
 static void splash_dismiss_cb(lv_timer_t *t) {
-    lv_obj_t *cont = (lv_obj_t *)t->user_data;
+    lv_obj_t *cont = (lv_obj_t *)lv_timer_get_user_data(t);
     lv_timer_del(t);
     lv_anim_t a;
     lv_anim_init(&a);
@@ -491,7 +491,7 @@ void ui_splash_show(void) {
         lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
     }
     // rotating sweep
-    lv_obj_t *sweep = lv_spinner_create(cont, 1400, 55);
+    lv_obj_t *sweep = lv_spinner_create(cont);
     lv_obj_set_size(sweep, 210, 210);
     lv_obj_align(sweep, LV_ALIGN_CENTER, 0, -8);
     lv_obj_set_style_arc_opa(sweep, 0, LV_PART_MAIN);
@@ -567,7 +567,7 @@ void ui_create(void) {
     lv_obj_remove_style_all(s_hudWifi);
     lv_obj_set_size(s_hudWifi, 21, 14);
     lv_obj_align(s_hudWifi, LV_ALIGN_TOP_MID, -94, 50);
-    lv_obj_clear_flag(s_hudWifi, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_hudWifi, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
     for (int i = 0; i < 4; ++i) {
         s_hudBars[i] = lv_obj_create(s_hudWifi);
         lv_obj_remove_style_all(s_hudBars[i]);
@@ -576,7 +576,7 @@ void ui_create(void) {
         lv_obj_set_style_radius(s_hudBars[i], 1, 0);
         lv_obj_set_style_bg_color(s_hudBars[i], UI_INK, 0);
         lv_obj_set_style_bg_opa(s_hudBars[i], LV_OPA_COVER, 0);
-        lv_obj_clear_flag(s_hudBars[i], LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(s_hudBars[i], (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
     }
 
     s_hudGps = lv_label_create(s_tileRadar);     // GPS satellite icon (between WiFi bars and count)

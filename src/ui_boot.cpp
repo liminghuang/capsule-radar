@@ -5,7 +5,7 @@
 #include <stdio.h>
 
 static void uptime_timer_cb(lv_timer_t *t) {
-    lv_obj_t *label = (lv_obj_t *)t->user_data;
+    lv_obj_t *label = (lv_obj_t *)lv_timer_get_user_data(t);
     char buf[40];
     snprintf(buf, sizeof(buf), "uptime %lus", (unsigned long)(lv_tick_get() / 1000));
     lv_label_set_text(label, buf);
@@ -37,7 +37,7 @@ void ui_boot_create(void) {
     lv_timer_create(uptime_timer_cb, 500, up);
 
     // Animated spinner = proof the LVGL tick + render loop are running.
-    lv_obj_t *spin = lv_spinner_create(scr, 1200, 50);
+    lv_obj_t *spin = lv_spinner_create(scr);
     lv_obj_set_size(spin, 96, 96);
     lv_obj_align(spin, LV_ALIGN_CENTER, 0, 96);
     lv_obj_set_style_arc_color(spin, lv_color_hex(0x0E2A0E), LV_PART_MAIN);

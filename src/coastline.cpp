@@ -53,19 +53,22 @@ void coastline_project(double homeLat, double homeLon, double rangeKm,
     }
 }
 
-void coastline_draw(lv_draw_ctx_t *ctx, lv_color_t color, lv_opa_t opa, lv_coord_t width) {
+void coastline_draw(lv_layer_t *layer, lv_color_t color, lv_opa_t opa, int32_t width) {
     if (s_lines.empty()) return;
     lv_draw_line_dsc_t d;
     lv_draw_line_dsc_init(&d);
     d.color = color;
     d.width = width;
     d.opa   = opa;
-    d.round_start = d.round_end = 1;   // smooth the joints on the thicker line
+    d.round_start = d.round_end = 1;
     for (const auto &line : s_lines) {
         for (size_t i = 1; i < line.size(); ++i) {
-            lv_point_t a = line[i - 1];
-            lv_point_t b = line[i];
-            lv_draw_line(ctx, &d, &a, &b);
+            // p1/p2 now live inside the dsc (lv_point_precise_t) in LVGL v9
+            d.p1.x = (lv_value_precise_t)line[i - 1].x;
+            d.p1.y = (lv_value_precise_t)line[i - 1].y;
+            d.p2.x = (lv_value_precise_t)line[i].x;
+            d.p2.y = (lv_value_precise_t)line[i].y;
+            lv_draw_line(layer, &d);
         }
     }
 }
