@@ -141,9 +141,7 @@ static inline bool orb() { return s_theme == THEME_ORB; }
 static inline bool ripple() { return s_theme == THEME_RIPPLE; }
 #if defined(ESP_PLATFORM)
 static inline bool directRipple(const display::RippleWave *waves, int count) { return display::rippleOverlay(waves, count, s_phosphorScanRgb); }
-// Direct QSPI writes use the panel's native coordinate system. Rotated layouts
-// stay on the LVGL path, which already owns the correct transform.
-static inline bool hasDirectRippleBase() { return display::baseFrame() != nullptr && display::rotation() == 0; }
+static inline bool hasDirectRippleBase() { return display::baseFrame() != nullptr; }
 static inline void clearDirectRipple() { display::clearRippleOverlay(); }
 #else
 static inline bool directRipple(const display::RippleWave *, int) { return false; }
@@ -343,60 +341,18 @@ static void wedge_bbox(float deg, lv_area_t *out) {
     out->x2 = maxx + pad; out->y2 = maxy + pad;
 }
 
-// In rotated mode LVGL owns the panel transform. Invalidating a whole circle's
-// bounding box becomes a nearly full-screen redraw near the rim, so split the
-// old/new annuli into horizontal left/right bands. This retains the correct
-// transform while redrawing only the parts that can actually contain a wave.
-static void invalidate_ripple_bands(float oldBase, float newBase) {
-    // Fewer, overlapping strips avoid anti-alias seams where independently
-    // clipped LVGL arcs meet, while still avoiding a full-circle redraw.
-    constexpr int BAND_COUNT = 4;
-    constexpr int SEAM_OVERLAP_PX = 6;
-    float radii[RIPPLE_WAVES * 2];
+// Fallback only: the direct compositor normally owns Ripple animation. Keep one
+// contiguous invalidation area so an allocation failure never breaks the arc.
+static void ripple_bbox(float base, lv_area_t *out) {
     float maxRadius = 0.0f;
-    int n = 0;
-    for (const float base : {oldBase, newBase}) {
-        for (int i = 0; i < RIPPLE_WAVES; ++i) {
-            const float radius = ripple_phase(base, i) * (float)RIPPLE_R_OUTER_PX;
-            radii[n++] = radius;
-            if (radius > maxRadius) maxRadius = radius;
-        }
+    for (int i = 0; i < RIPPLE_WAVES; ++i) {
+        const float radius = ripple_phase(base, i) * (float)RIPPLE_R_OUTER_PX;
+        if (radius > maxRadius) maxRadius = radius;
     }
-
-    const int pad = RIPPLE_GLOW_WIDTH / 2 + 2;
-    const int yFirst = LV_MAX(0, (int)s_cy - (int)ceilf(maxRadius) - pad);
-    const int yLast = LV_MIN(SCREEN_H - 1, (int)s_cy + (int)ceilf(maxRadius) + pad);
-    const int height = yLast - yFirst + 1;
-    if (height <= 0) return;
-
-    for (int band = 0; band < BAND_COUNT; ++band) {
-        const int y0 = LV_MAX(yFirst, yFirst + (height * band) / BAND_COUNT - SEAM_OVERLAP_PX);
-        const int y1 = LV_MIN(yLast, yFirst + (height * (band + 1)) / BAND_COUNT - 1 + SEAM_OVERLAP_PX);
-        int leftStart = SCREEN_W, leftEnd = -1, rightStart = SCREEN_W, rightEnd = -1;
-        for (int y = y0; y <= y1; ++y) {
-            for (int i = 0; i < n; ++i) {
-                const RippleRowSpans spans = rippleRowSpans(s_cx, s_cy, radii[i],
-                    (float)RIPPLE_GLOW_WIDTH, (int16_t)y, 0, SCREEN_W - 1);
-                if (!spans.valid) continue;
-                if (spans.leftStart <= spans.leftEnd) {
-                    if (spans.leftStart < leftStart) leftStart = spans.leftStart;
-                    if (spans.leftEnd > leftEnd) leftEnd = spans.leftEnd;
-                }
-                if (spans.rightStart <= spans.rightEnd) {
-                    if (spans.rightStart < rightStart) rightStart = spans.rightStart;
-                    if (spans.rightEnd > rightEnd) rightEnd = spans.rightEnd;
-                }
-            }
-        }
-        if (leftStart <= leftEnd) {
-            lv_area_t area = { (lv_coord_t)leftStart, (lv_coord_t)y0, (lv_coord_t)leftEnd, (lv_coord_t)y1 };
-            lv_obj_invalidate_area(s_sweep, &area);
-        }
-        if (rightStart <= rightEnd) {
-            lv_area_t area = { (lv_coord_t)rightStart, (lv_coord_t)y0, (lv_coord_t)rightEnd, (lv_coord_t)y1 };
-            lv_obj_invalidate_area(s_sweep, &area);
-        }
-    }
+    const lv_coord_t pad = RIPPLE_GLOW_WIDTH / 2 + 2;
+    const lv_coord_t radius = (lv_coord_t)ceilf(maxRadius) + pad;
+    out->x1 = s_cx - radius; out->y1 = s_cy - radius;
+    out->x2 = s_cx + radius; out->y2 = s_cy + radius;
 }
 
 // glyph + label bounding box (for partial invalidation during the glide)
@@ -470,7 +426,13 @@ static void sweep_timer_cb(lv_timer_t *t) {
                          rippleOpacity(phase, RIPPLE_CORE_OPACITY, RIPPLE_EDGE_OPACITY) };
         }
         if (directRipple(waves, RIPPLE_WAVES)) return;
-        if (s_sweep) invalidate_ripple_bands(s_prevRipplePhase, s_ripplePhase);
+        if (s_sweep) {
+            lv_area_t oldArea, newArea;
+            ripple_bbox(s_prevRipplePhase, &oldArea);
+            ripple_bbox(s_ripplePhase, &newArea);
+            area_union(oldArea, newArea);
+            lv_obj_invalidate_area(s_sweep, &oldArea);
+        }
         return;
     }
     s_prevSweepDeg = s_sweepDeg;
