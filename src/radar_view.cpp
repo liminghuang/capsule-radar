@@ -343,20 +343,6 @@ static void wedge_bbox(float deg, lv_area_t *out) {
     out->x2 = maxx + pad; out->y2 = maxy + pad;
 }
 
-// Fallback only: the direct compositor normally owns Ripple animation. Keep one
-// contiguous invalidation area so an allocation failure never breaks the arc.
-static void ripple_bbox(float base, lv_area_t *out) {
-    float maxRadius = 0.0f;
-    for (int i = 0; i < RIPPLE_WAVES; ++i) {
-        const float radius = ripple_phase(base, i) * (float)RIPPLE_R_OUTER_PX;
-        if (radius > maxRadius) maxRadius = radius;
-    }
-    const lv_coord_t pad = RIPPLE_GLOW_WIDTH / 2 + 2;
-    const lv_coord_t radius = (lv_coord_t)ceilf(maxRadius) + pad;
-    out->x1 = s_cx - radius; out->y1 = s_cy - radius;
-    out->x2 = s_cx + radius; out->y2 = s_cy + radius;
-}
-
 // glyph + label bounding box (for partial invalidation during the glide)
 static inline lv_area_t glyph_bbox(lv_point_t p) {
     lv_area_t a;
@@ -428,13 +414,10 @@ static void sweep_timer_cb(lv_timer_t *t) {
                          rippleOpacity(phase, RIPPLE_CORE_OPACITY, RIPPLE_EDGE_OPACITY) };
         }
         if (directRipple(waves, RIPPLE_WAVES)) return;
-        if (s_sweep) {
-            lv_area_t oldArea, newArea;
-            ripple_bbox(s_prevRipplePhase, &oldArea);
-            ripple_bbox(s_ripplePhase, &newArea);
-            area_union(oldArea, newArea);
-            lv_obj_invalidate_area(s_sweep, &oldArea);
-        }
+        // The CO5300/LVGL partial invalidation path has repeatedly clipped the
+        // outer arc on real hardware. Redraw this transparent overlay in full
+        // until a hardware-verified partial renderer replaces it.
+        if (s_sweep) lv_obj_invalidate(s_sweep);
         return;
     }
     s_prevSweepDeg = s_sweepDeg;
