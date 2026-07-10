@@ -348,7 +348,10 @@ static void wedge_bbox(float deg, lv_area_t *out) {
 // old/new annuli into horizontal left/right bands. This retains the correct
 // transform while redrawing only the parts that can actually contain a wave.
 static void invalidate_ripple_bands(float oldBase, float newBase) {
-    constexpr int BAND_COUNT = 8;  // 16 rectangles: safely below LVGL's 32-area buffer
+    // Fewer, overlapping strips avoid anti-alias seams where independently
+    // clipped LVGL arcs meet, while still avoiding a full-circle redraw.
+    constexpr int BAND_COUNT = 4;
+    constexpr int SEAM_OVERLAP_PX = 6;
     float radii[RIPPLE_WAVES * 2];
     float maxRadius = 0.0f;
     int n = 0;
@@ -367,8 +370,8 @@ static void invalidate_ripple_bands(float oldBase, float newBase) {
     if (height <= 0) return;
 
     for (int band = 0; band < BAND_COUNT; ++band) {
-        const int y0 = yFirst + (height * band) / BAND_COUNT;
-        const int y1 = yFirst + (height * (band + 1)) / BAND_COUNT - 1;
+        const int y0 = LV_MAX(yFirst, yFirst + (height * band) / BAND_COUNT - SEAM_OVERLAP_PX);
+        const int y1 = LV_MIN(yLast, yFirst + (height * (band + 1)) / BAND_COUNT - 1 + SEAM_OVERLAP_PX);
         int leftStart = SCREEN_W, leftEnd = -1, rightStart = SCREEN_W, rightEnd = -1;
         for (int y = y0; y <= y1; ++y) {
             for (int i = 0; i < n; ++i) {
