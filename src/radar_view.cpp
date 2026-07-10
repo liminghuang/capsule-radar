@@ -22,7 +22,7 @@
 #include <deque>
 #include <algorithm>
 #include <stdlib.h>
-#if defined(ESP_PLATFORM)
+#if defined(ESP_PLATFORM) && RIPPLE_DIRECT_COMPOSITOR
 #include <esp_heap_caps.h>
 #endif
 
