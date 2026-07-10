@@ -195,6 +195,7 @@ void setBrightness(uint8_t v) { if (s_gfx) s_gfx->setBrightness(v); }
 
 void setRotation(uint8_t quarters) {
     s_rot = (uint8_t)(quarters & 3);   // 0..3 = 0°/90°/180°/270°
+    s_oldRippleCount = 0;              // stale ring positions don't carry across rotation changes
     // Re-apply the theme so the correct Ripple path is visible immediately.
     radar::setTheme(radar::theme());
     lv_obj_t *scr = lv_scr_act();
@@ -223,7 +224,7 @@ static void markRing(int16_t y, const RippleWave &wave, bool draw) {
 }
 
 bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
-    if (!s_gfx || !s_baseFrame || !waves || count < 1 || count > 2) return false;
+    if (!s_gfx || !s_baseFrame || s_rot != 0 || !waves || count < 1 || count > 2) return false;
     const lv_color_t color = lv_color_hex(rgb);
     const int16_t yFirst = LV_MAX(0, SCREEN_CY - RIPPLE_R_OUTER_PX - RIPPLE_GLOW_WIDTH_PX);
     const int16_t yLast  = LV_MIN(SCREEN_H - 1, SCREEN_CY + RIPPLE_R_OUTER_PX + RIPPLE_GLOW_WIDTH_PX);
@@ -231,68 +232,30 @@ bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
     // draw16bitRGBBitmap() call acquires and releases the bus independently —
     // ~930 round-trips for a full ring. One startWrite() reduces that to one.
     s_gfx->startWrite();
-    for (int16_t logY = yFirst; logY <= yLast; ++logY) {
+    for (int16_t y = yFirst; y <= yLast; ++y) {
         memset(s_dirty, 0, sizeof(s_dirty)); memset(s_alpha, 0, sizeof(s_alpha));
-        for (int i = 0; i < s_oldRippleCount; ++i) markRing(logY, s_oldRipple[i], false);
-        for (int i = 0; i < count; ++i) markRing(logY, waves[i], true);
+        for (int i = 0; i < s_oldRippleCount; ++i) markRing(y, s_oldRipple[i], false);
+        for (int i = 0; i < count; ++i) markRing(y, waves[i], true);
         for (int x = 0; x < SCREEN_W;) {
             while (x < SCREEN_W && !s_dirty[x]) ++x;
             const int dirtyStart = x;
             while (x < SCREEN_W && s_dirty[x]) ++x;
             if (x > dirtyStart) {
                 // CO5300 only accepts even-x through odd-x partial windows.
-                const int logStart = dirtyStart & ~1;
-                const int logEnd   = LV_MIN(SCREEN_W - 1, (x - 1) | 1);
-                const int len = logEnd - logStart + 1;
-                for (int px = logStart; px <= logEnd; ++px) {
-                    const lv_color_t base = s_baseFrame[logY * SCREEN_W + px];
-                    s_line[px - logStart] = s_dirty[px] && s_alpha[px]
+                // Include the extra edge pixels from the captured base scene so
+                // alignment never leaves a square notch in a short arc segment.
+                const int start = dirtyStart & ~1;
+                const int end = LV_MIN(SCREEN_W - 1, (x - 1) | 1);
+                for (int px = start; px <= end; ++px) {
+                    const lv_color_t base = s_baseFrame[y * SCREEN_W + px];
+                    s_line[px - start] = s_dirty[px] && s_alpha[px]
                         ? lv_color_mix(color, base, s_alpha[px]) : base;
                 }
-                // Map logical row/span to physical panel coordinates per rotation.
-                // s_baseFrame is always in logical (rotation=0) coordinates; the panel
-                // receives physical coordinates derived from the active rotation.
-                switch (s_rot) {
-                    default: // 0° — logical == physical
 #if (LV_COLOR_16_SWAP != 0)
-                        s_gfx->draw16bitBeRGBBitmap(logStart, logY, (uint16_t *)s_line, len, 1);
+                s_gfx->draw16bitBeRGBBitmap(start, y, (uint16_t *)s_line, end - start + 1, 1);
 #else
-                        s_gfx->draw16bitRGBBitmap(logStart, logY, (uint16_t *)s_line, len, 1);
+                s_gfx->draw16bitRGBBitmap(start, y, (uint16_t *)s_line, end - start + 1, 1);
 #endif
-                        break;
-                    case 1: // 90° CW: logical(x,y) → physical(SCREEN_H-1-y, x)
-                        // Horizontal span → vertical physical strip (no pixel reorder needed)
-#if (LV_COLOR_16_SWAP != 0)
-                        s_gfx->draw16bitBeRGBBitmap(SCREEN_H - 1 - logY, logStart, (uint16_t *)s_line, 1, len);
-#else
-                        s_gfx->draw16bitRGBBitmap(SCREEN_H - 1 - logY, logStart, (uint16_t *)s_line, 1, len);
-#endif
-                        break;
-                    case 2: { // 180°: logical(x,y) → physical(SCREEN_W-1-x, SCREEN_H-1-y)
-                        // Reverse pixel order to match flipped x axis
-                        for (int i = 0, j = len - 1; i < j; ++i, --j) {
-                            lv_color_t tmp = s_line[i]; s_line[i] = s_line[j]; s_line[j] = tmp;
-                        }
-#if (LV_COLOR_16_SWAP != 0)
-                        s_gfx->draw16bitBeRGBBitmap(SCREEN_W - 1 - logEnd, SCREEN_H - 1 - logY, (uint16_t *)s_line, len, 1);
-#else
-                        s_gfx->draw16bitRGBBitmap(SCREEN_W - 1 - logEnd, SCREEN_H - 1 - logY, (uint16_t *)s_line, len, 1);
-#endif
-                        break;
-                    }
-                    case 3: { // 270° CW: logical(x,y) → physical(y, SCREEN_W-1-x)
-                        // Horizontal span → vertical physical strip with reversed order
-                        for (int i = 0, j = len - 1; i < j; ++i, --j) {
-                            lv_color_t tmp = s_line[i]; s_line[i] = s_line[j]; s_line[j] = tmp;
-                        }
-#if (LV_COLOR_16_SWAP != 0)
-                        s_gfx->draw16bitBeRGBBitmap(logY, SCREEN_W - 1 - logEnd, (uint16_t *)s_line, 1, len);
-#else
-                        s_gfx->draw16bitRGBBitmap(logY, SCREEN_W - 1 - logEnd, (uint16_t *)s_line, 1, len);
-#endif
-                        break;
-                    }
-                }
             }
         }
     }
