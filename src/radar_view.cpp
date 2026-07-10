@@ -343,19 +343,57 @@ static void wedge_bbox(float deg, lv_area_t *out) {
     out->x2 = maxx + pad; out->y2 = maxy + pad;
 }
 
-// A full-object invalidation forces a 466x466 redraw even when the expanding
-// waves are near the centre. Limit the dirty rectangle to the largest old/new
-// wave instead; LVGL clears the old arc and paints the new one inside that box.
-static void ripple_bbox(float base, lv_area_t *out) {
+// In rotated mode LVGL owns the panel transform. Invalidating a whole circle's
+// bounding box becomes a nearly full-screen redraw near the rim, so split the
+// old/new annuli into horizontal left/right bands. This retains the correct
+// transform while redrawing only the parts that can actually contain a wave.
+static void invalidate_ripple_bands(float oldBase, float newBase) {
+    constexpr int BAND_COUNT = 8;  // 16 rectangles: safely below LVGL's 32-area buffer
+    float radii[RIPPLE_WAVES * 2];
     float maxRadius = 0.0f;
-    for (int i = 0; i < RIPPLE_WAVES; ++i) {
-        const float radius = ripple_phase(base, i) * (float)RIPPLE_R_OUTER_PX;
-        if (radius > maxRadius) maxRadius = radius;
+    int n = 0;
+    for (const float base : {oldBase, newBase}) {
+        for (int i = 0; i < RIPPLE_WAVES; ++i) {
+            const float radius = ripple_phase(base, i) * (float)RIPPLE_R_OUTER_PX;
+            radii[n++] = radius;
+            if (radius > maxRadius) maxRadius = radius;
+        }
     }
-    const lv_coord_t pad = RIPPLE_GLOW_WIDTH / 2 + 2;
-    const lv_coord_t radius = (lv_coord_t)ceilf(maxRadius) + pad;
-    out->x1 = s_cx - radius; out->y1 = s_cy - radius;
-    out->x2 = s_cx + radius; out->y2 = s_cy + radius;
+
+    const int pad = RIPPLE_GLOW_WIDTH / 2 + 2;
+    const int yFirst = LV_MAX(0, (int)s_cy - (int)ceilf(maxRadius) - pad);
+    const int yLast = LV_MIN(SCREEN_H - 1, (int)s_cy + (int)ceilf(maxRadius) + pad);
+    const int height = yLast - yFirst + 1;
+    if (height <= 0) return;
+
+    for (int band = 0; band < BAND_COUNT; ++band) {
+        const int y0 = yFirst + (height * band) / BAND_COUNT;
+        const int y1 = yFirst + (height * (band + 1)) / BAND_COUNT - 1;
+        int leftStart = SCREEN_W, leftEnd = -1, rightStart = SCREEN_W, rightEnd = -1;
+        for (int y = y0; y <= y1; ++y) {
+            for (int i = 0; i < n; ++i) {
+                const RippleRowSpans spans = rippleRowSpans(s_cx, s_cy, radii[i],
+                    (float)RIPPLE_GLOW_WIDTH, (int16_t)y, 0, SCREEN_W - 1);
+                if (!spans.valid) continue;
+                if (spans.leftStart <= spans.leftEnd) {
+                    if (spans.leftStart < leftStart) leftStart = spans.leftStart;
+                    if (spans.leftEnd > leftEnd) leftEnd = spans.leftEnd;
+                }
+                if (spans.rightStart <= spans.rightEnd) {
+                    if (spans.rightStart < rightStart) rightStart = spans.rightStart;
+                    if (spans.rightEnd > rightEnd) rightEnd = spans.rightEnd;
+                }
+            }
+        }
+        if (leftStart <= leftEnd) {
+            lv_area_t area = { (lv_coord_t)leftStart, (lv_coord_t)y0, (lv_coord_t)leftEnd, (lv_coord_t)y1 };
+            lv_obj_invalidate_area(s_sweep, &area);
+        }
+        if (rightStart <= rightEnd) {
+            lv_area_t area = { (lv_coord_t)rightStart, (lv_coord_t)y0, (lv_coord_t)rightEnd, (lv_coord_t)y1 };
+            lv_obj_invalidate_area(s_sweep, &area);
+        }
+    }
 }
 
 // glyph + label bounding box (for partial invalidation during the glide)
@@ -429,13 +467,7 @@ static void sweep_timer_cb(lv_timer_t *t) {
                          rippleOpacity(phase, RIPPLE_CORE_OPACITY, RIPPLE_EDGE_OPACITY) };
         }
         if (directRipple(waves, RIPPLE_WAVES)) return;
-        if (s_sweep) {
-            lv_area_t oldArea, newArea;
-            ripple_bbox(s_prevRipplePhase, &oldArea);
-            ripple_bbox(s_ripplePhase, &newArea);
-            area_union(oldArea, newArea);
-            lv_obj_invalidate_area(s_sweep, &oldArea);
-        }
+        if (s_sweep) invalidate_ripple_bands(s_prevRipplePhase, s_ripplePhase);
         return;
     }
     s_prevSweepDeg = s_sweepDeg;
