@@ -26,6 +26,8 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define SCREEN_CY           233
 #define RADAR_R_OUTER_PX    218            // outer ring radius in pixels
 #define RIPPLE_R_OUTER_PX   (SCREEN_CX - 1) // Ripple reaches the physical round-panel edge (232 px)
+#define RIPPLE_CORE_OPACITY 220            // 0..255: bright leading edge at the centre
+#define RIPPLE_EDGE_OPACITY 72             // 0..255: still visibly reaches the physical panel edge
 #define LV_COLOR_DEPTH_BITS 16
 #define LCD_COL_OFFSET      6              // CO5300 column (x) gap on this panel (esp_lcd set_gap 0x06)
 #define LCD_ROW_OFFSET      0              // no row (y) gap

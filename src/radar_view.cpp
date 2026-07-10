@@ -10,6 +10,7 @@
 #include "coastline.h"
 #include "airports.h"
 #include "display.h"
+#include "ripple_compositor.h"
 #include <lvgl.h>
 #include <math.h>
 #include <stdio.h>
@@ -285,8 +286,8 @@ static void sweep_draw_cb(lv_event_t *e) {
         wave.width = RIPPLE_WIDTH;
         for (int i = 0; i < RIPPLE_WAVES; ++i) {
             const float phase = ripple_phase(s_ripplePhase, i);
-            // Fade linearly, retaining a faint 10% trace at the outer ring.
-            const lv_opa_t coreOpa = (lv_opa_t)(220.0f * (1.0f - 0.9f * phase));
+            const lv_opa_t coreOpa = (lv_opa_t)rippleOpacity(
+                phase, RIPPLE_CORE_OPACITY, RIPPLE_EDGE_OPACITY);
             const lv_coord_t radius = (lv_coord_t)(phase * R);
             if (radius <= 0) continue;
             // A wide, faint halo behind the narrow bright edge gives a clearly
@@ -423,7 +424,7 @@ static void sweep_timer_cb(lv_timer_t *t) {
         for (int i = 0; i < RIPPLE_WAVES; ++i) {
             const float phase = ripple_phase(s_ripplePhase, i);
             waves[i] = { phase * (float)RIPPLE_R_OUTER_PX,
-                         (uint8_t)(220.0f * (1.0f - 0.9f * phase)) };
+                         rippleOpacity(phase, RIPPLE_CORE_OPACITY, RIPPLE_EDGE_OPACITY) };
         }
         if (directRipple(waves, RIPPLE_WAVES)) return;
         if (s_sweep) {

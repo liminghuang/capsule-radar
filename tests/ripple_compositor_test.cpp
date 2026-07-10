@@ -2,6 +2,11 @@
 #include "ripple_compositor.h"
 
 int main() {
+    assert(rippleOpacity(0.0f, 220, 72) == 220);
+    assert(rippleOpacity(1.0f, 220, 72) == 72);
+    assert(rippleOpacity(-1.0f, 220, 72) == 220);
+    assert(rippleOpacity(2.0f, 220, 72) == 72);
+
     const RippleRowSpans middle = rippleRowSpans(100, 100, 40.0f, 4.0f, 100, 0, 200);
     assert(middle.valid);
     assert(middle.leftStart == 58 && middle.leftEnd == 62);

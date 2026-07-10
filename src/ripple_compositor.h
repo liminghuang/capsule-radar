@@ -11,6 +11,15 @@ struct RippleRowSpans {
     bool valid = false;
 };
 
+// Keep the outer edge visible on a black AMOLED panel.  A value near 10% is
+// mathematically present but visually lost once the halo is alpha-composited.
+inline uint8_t rippleOpacity(float phase, uint8_t coreOpacity, uint8_t edgeOpacity) {
+    if (phase < 0.0f) phase = 0.0f;
+    if (phase > 1.0f) phase = 1.0f;
+    return (uint8_t)((float)edgeOpacity +
+                     ((float)coreOpacity - (float)edgeOpacity) * (1.0f - phase));
+}
+
 inline RippleRowSpans rippleRowSpans(int16_t cx, int16_t cy, float radius,
                                      float width, int16_t y,
                                      int16_t minX, int16_t maxX) {
