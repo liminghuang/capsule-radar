@@ -1,6 +1,7 @@
 #pragma once
 // Scope rendering API (M1 scope, M2 aircraft, M3 selection). See docs/ARCHITECTURE.md.
 // Visual reference: assets/plane_radar_2.0_mockup.html
+#include <stdint.h>
 #include <vector>
 #include "aircraft.h"
 
@@ -17,7 +18,8 @@ enum RadarTheme {
     THEME_ORB   = 1,   // Orb scope: green gradient, grid, yellow blips
     THEME_AMBER    = 2,   // amber CRT scope (warm monochrome chrome)
     THEME_MILITARY = 3,   // night-vision / military green scope
-    THEME_COUNT    = 4
+    THEME_RIPPLE   = 4,   // phosphor scope with centre-outward water-ripple scan
+    THEME_COUNT    = 5
 };
 
 // Flattened, display-ready info for one aircraft (detail card / list view).
@@ -63,6 +65,8 @@ void setTheme(int theme);
 int  theme();
 void cycleTheme();
 void setThemeChangedCb(void (*cb)(int theme));   // called when the theme changes (for persistence)
+void setPhosphorScanColor(uint32_t rgb);         // Phosphor + Ripple scan colour, 0xRRGGBB
+uint32_t phosphorScanColor();
 void setRangeLabelVisible(bool v);               // hide the built-in range label (UI shows its own)
 void setSweepEnabled(bool on);                   // show/hide the rotating sweep line
 bool sweepEnabled();

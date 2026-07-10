@@ -3,6 +3,7 @@
 //   THEME_PHOSPHOR : green-on-black radar scope (rings, sweep, altitude glyphs)
 //   THEME_ORB   : Orb scope: green gradient, square grid, the 7 nearest
 //                    aircraft as yellow balls (emitting waves) + off-range arrows.
+//   THEME_RIPPLE : phosphor scope with concentric scan waves expanding from centre.
 #include "radar_view.h"
 #include "config.h"
 #include "geo.h"
@@ -53,6 +54,11 @@
 #define SWEEP_TRAIL_DEG   38.0f
 #define SWEEP_TRAIL_STEPS 20
 #define SWEEP_TRAIL_OPA   72
+#define RIPPLE_PERIOD_MS  6000  // centre-to-rim travel; half the previous scan speed
+#define RIPPLE_FRAME_MS   120   // 6 s wave advances ~4 px/frame; avoids overloading the panel
+#define RIPPLE_WAVES      2   // a new wave starts when the previous one reaches half range
+#define RIPPLE_WIDTH      2
+#define RIPPLE_GLOW_WIDTH 8
 
 // ---- aircraft / flow / orb config ----
 #define TRAIL_MAX         7
@@ -67,6 +73,7 @@
 
 static int        s_theme    = THEME_PHOSPHOR;
 static void      (*s_themeCb)(int) = nullptr;
+static uint32_t   s_phosphorScanRgb = 0x3DFF9A;
 // scope "chrome" palette (rings/sweep/crosshair/labels) — retinted per theme
 static lv_color_t s_cRing = COL_GREEN, s_cLead = COL_LEAD, s_cInk = COL_INK, s_cSoft = COL_SOFT;
 static lv_obj_t  *s_parent   = nullptr;
@@ -88,6 +95,10 @@ static int        s_flowGenMax      = 14;          // ...and an age cap in polls
 static lv_timer_t *s_timer    = nullptr;
 static float       s_sweepDeg = 0.0f;
 static float       s_prevSweepDeg = 0.0f;
+static float       s_ripplePhase = 0.0f;
+static float       s_prevRipplePhase = 0.0f;
+static uint32_t    s_lastRippleMs = 0;
+static uint32_t    s_lastRippleFrameMs = 0;
 static float       s_wavePhase = 0.0f;
 static uint32_t    s_lastUpdateMs = 0;       // smooth-motion: cadence + animation clock
 static uint32_t    s_animStartMs  = 0;
@@ -125,6 +136,13 @@ static const float GX[4] = { 0.0f,  7.0f, 0.0f, -7.0f };
 static const float GY[4] = { -11.0f, 5.0f, 8.0f, 5.0f };
 
 static inline bool orb() { return s_theme == THEME_ORB; }
+static inline bool ripple() { return s_theme == THEME_RIPPLE; }
+
+static float ripple_phase(float base, int wave) {
+    float phase = base - (float)wave / (float)RIPPLE_WAVES;
+    if (phase < 0.0f) phase += 1.0f;
+    return phase;
+}
 
 static void show(lv_obj_t *o, bool v) {
     if (!o) return;
@@ -246,9 +264,34 @@ static void sweep_draw_cb(lv_event_t *e) {
     const lv_point_t center = { s_cx, s_cy };
     const float R = (float)RADAR_R_OUTER_PX;
 
+    if (ripple()) {
+        lv_draw_arc_dsc_t glow;
+        lv_draw_arc_dsc_init(&glow);
+        glow.color = s_cLead;
+        glow.width = RIPPLE_GLOW_WIDTH;
+        lv_draw_arc_dsc_t wave;
+        lv_draw_arc_dsc_init(&wave);
+        wave.color = s_cLead;
+        wave.width = RIPPLE_WIDTH;
+        for (int i = 0; i < RIPPLE_WAVES; ++i) {
+            const float phase = ripple_phase(s_ripplePhase, i);
+            // Fade linearly, retaining a faint 10% trace at the outer ring.
+            const lv_opa_t coreOpa = (lv_opa_t)(220.0f * (1.0f - 0.9f * phase));
+            const lv_coord_t radius = (lv_coord_t)(phase * R);
+            if (radius <= 0) continue;
+            // A wide, faint halo behind the narrow bright edge gives a clearly
+            // visible gradient without rasterising several separate trail rings.
+            glow.opa = (lv_opa_t)((float)coreOpa * 0.32f);
+            lv_draw_arc(dctx, &glow, &center, radius, 0, 360);
+            wave.opa = coreOpa;
+            lv_draw_arc(dctx, &wave, &center, radius, 0, 360);
+        }
+        return;
+    }
+
     lv_draw_line_dsc_t ld;
     lv_draw_line_dsc_init(&ld);
-    ld.color = s_cRing;
+    ld.color = s_cLead;
     ld.width = 5;
     ld.round_start = 1;
     ld.round_end = 1;
@@ -285,6 +328,21 @@ static void wedge_bbox(float deg, lv_area_t *out) {
     const lv_coord_t pad = 6;
     out->x1 = minx - pad; out->y1 = miny - pad;
     out->x2 = maxx + pad; out->y2 = maxy + pad;
+}
+
+// A full-object invalidation forces a 466x466 redraw even when the expanding
+// waves are near the centre. Limit the dirty rectangle to the largest old/new
+// wave instead; LVGL clears the old arc and paints the new one inside that box.
+static void ripple_bbox(float base, lv_area_t *out) {
+    float maxRadius = 0.0f;
+    for (int i = 0; i < RIPPLE_WAVES; ++i) {
+        const float radius = ripple_phase(base, i) * (float)RADAR_R_OUTER_PX;
+        if (radius > maxRadius) maxRadius = radius;
+    }
+    const lv_coord_t pad = RIPPLE_GLOW_WIDTH / 2 + 2;
+    const lv_coord_t radius = (lv_coord_t)ceilf(maxRadius) + pad;
+    out->x1 = s_cx - radius; out->y1 = s_cy - radius;
+    out->x2 = s_cx + radius; out->y2 = s_cy + radius;
 }
 
 // glyph + label bounding box (for partial invalidation during the glide)
@@ -342,6 +400,24 @@ static void sweep_timer_cb(lv_timer_t *t) {
         return;
     }
     if (!s_sweepEnabled) return;          // sweep disabled: glyph interpolation above still runs
+    if (ripple()) {
+        const uint32_t now = lv_tick_get();
+        if (s_lastRippleFrameMs && now - s_lastRippleFrameMs < RIPPLE_FRAME_MS) return;
+        s_lastRippleFrameMs = now;
+        const uint32_t elapsed = s_lastRippleMs ? now - s_lastRippleMs : SWEEP_FRAME_MS;
+        s_lastRippleMs = now;
+        s_prevRipplePhase = s_ripplePhase;
+        s_ripplePhase += (float)elapsed / (float)RIPPLE_PERIOD_MS;
+        while (s_ripplePhase >= 1.0f) s_ripplePhase -= 1.0f;
+        if (s_sweep) {
+            lv_area_t oldArea, newArea;
+            ripple_bbox(s_prevRipplePhase, &oldArea);
+            ripple_bbox(s_ripplePhase, &newArea);
+            area_union(oldArea, newArea);
+            lv_obj_invalidate_area(s_sweep, &oldArea);
+        }
+        return;
+    }
     s_prevSweepDeg = s_sweepDeg;
     s_sweepDeg += 360.0f * (float)SWEEP_FRAME_MS / (float)SWEEP_PERIOD_MS;
     if (s_sweepDeg >= 360.0f) s_sweepDeg -= 360.0f;
@@ -542,6 +618,7 @@ namespace radar {
 
 void setTheme(int t) {
     s_theme = ((t % THEME_COUNT) + THEME_COUNT) % THEME_COUNT;
+    if (ripple()) { s_lastRippleMs = lv_tick_get(); s_lastRippleFrameMs = 0; }
     const bool drg = orb();
 
     switch (s_theme) {                          // pick the scope chrome palette
@@ -552,7 +629,8 @@ void setTheme(int t) {
             s_cRing = lv_color_hex(0x49C46B); s_cLead = lv_color_hex(0x76E08C);
             s_cInk  = lv_color_hex(0xE0FFE6); s_cSoft = lv_color_hex(0x9FD7A8); break;
         default:                                // phosphor (orb uses its own colors)
-            s_cRing = COL_GREEN; s_cLead = COL_LEAD; s_cInk = COL_INK; s_cSoft = COL_SOFT; break;
+            s_cRing = COL_GREEN; s_cLead = lv_color_hex(s_phosphorScanRgb);
+            s_cInk = COL_INK; s_cSoft = COL_SOFT; break;
     }
 
     if (s_parent) {
@@ -586,10 +664,16 @@ void setTheme(int t) {
 int  theme() { return s_theme; }
 void cycleTheme() { setTheme(s_theme + 1); }
 void setThemeChangedCb(void (*cb)(int)) { s_themeCb = cb; }
+void setPhosphorScanColor(uint32_t rgb) {
+    s_phosphorScanRgb = rgb & 0xFFFFFFu;
+    if (s_theme == THEME_PHOSPHOR || s_theme == THEME_RIPPLE) setTheme(s_theme);
+}
+uint32_t phosphorScanColor() { return s_phosphorScanRgb; }
 void setRangeLabelVisible(bool v) { s_rangeLblVisible = v; if (s_rangeLbl) show(s_rangeLbl, v && !orb()); }
 
 void setSweepEnabled(bool on) {
     s_sweepEnabled = on;
+    if (on && ripple()) { s_lastRippleMs = lv_tick_get(); s_lastRippleFrameMs = 0; }
     if (s_sweep) {
         show(s_sweep, on);
         if (!on) lv_obj_invalidate(s_sweep);   // clear any wedge currently painted
@@ -690,6 +774,10 @@ void init(void *lv_parent) {
 
     s_sweepDeg = 0.0f;
     s_prevSweepDeg = 0.0f;
+    s_ripplePhase = 0.0f;
+    s_prevRipplePhase = 0.0f;
+    s_lastRippleMs = 0;
+    s_lastRippleFrameMs = 0;
     if (!s_timer) s_timer = lv_timer_create(sweep_timer_cb, SWEEP_FRAME_MS, nullptr);
 
     setTheme(s_theme);

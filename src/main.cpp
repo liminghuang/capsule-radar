@@ -211,6 +211,7 @@ static void loadSettings() {
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_units            = p.getInt("units", 0);
     g_tz               = p.getString("tz", TZ_STR);
+    radar::setPhosphorScanColor(p.getUInt("sweepcol", 0x3DFF9A));
     for (int i = 0; i < BRIGHTNESS_SCHEDULE_RULES; ++i) {
         char key[16];
         snprintf(key, sizeof(key), "bs%den", i);
@@ -341,6 +342,8 @@ static WebServer g_web(80);
 
 static void handleRoot() {
     const int th = radar::theme();
+    char scanColor[8];
+    snprintf(scanColor, sizeof(scanColor), "#%06lX", (unsigned long)radar::phosphorScanColor());
     const int ranges[] = {10, 15, 25, 30, 50, 100, 150, 250};
     // The value submitted stays in km (the device works in km); only the label is shown in
     // the user's chosen distance unit so the config page matches the screen.
@@ -353,9 +356,9 @@ static void handleRoot() {
                  r, (r == (int)(g_settings.rangeKm + 0.5f)) ? " selected" : "", r * ufac, uname);
         ropts += o;
     }
-    const char *tnames[] = {"Phosphor", "Orb", "Amber CRT", "Military"};
+    const char *tnames[] = {"Phosphor", "Orb", "Amber CRT", "Military", "Phosphor Ripple"};
     String topts;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < THEME_COUNT; ++i) {
         char o[80];
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == th ? " selected" : "", tnames[i]);
         topts += o;
@@ -511,6 +514,8 @@ static void handleRoot() {
         "<div class=card><div class=t>Display</div>"
         "<label>Brightness</label>"
         "<input type=range min=5 max=255 value='%d' oninput='b(this.value,0)' onchange='b(this.value,1)'>"
+        "<label>Phosphor / Ripple scan colour</label>"
+        "<input type=color value='%s' onchange='sc(this.value)'>"
         "<label>Dim screen after</label><select onchange='d(this.value)'>%s</select>"
         "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
         "<label><input type=checkbox class=ck %s onchange='ap(this.checked)'>Show airports</label>"
@@ -540,6 +545,7 @@ static void handleRoot() {
         "MAP.on('click',function(e){MK.setLatLng(e.latlng);S(e.latlng);});"
         "setTimeout(function(){MAP.invalidateSize();},300);"
         "function b(v,s){fetch('/bright?v='+v+(s?'&save=1':''))}"
+        "function sc(v){fetch('/sweepcolor?rgb='+encodeURIComponent(v)+'&save=1')}"
         "function v(x,s){fetch('/vol?v='+x+(s?'&save=1':''))}"
         "function m(c){fetch('/vol?mute='+(c?1:0)+'&save=1')}"
         "function t(){fetch('/vol?test=1')}"
@@ -562,7 +568,7 @@ static void handleRoot() {
         "if(b>=0)e.selectedIndex=b;})();</script></body></html>",
         g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
         tzopts.c_str(),
-        g_brightnessDay, iopts.c_str(), g_showSweep ? "checked" : "",
+        g_brightnessDay, scanColor, iopts.c_str(), g_showSweep ? "checked" : "",
         g_showAirports ? "checked" : "", tlopts.c_str(), rotopts.c_str(), uopts.c_str(),
         scheduleRows,
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
@@ -730,6 +736,26 @@ static void handleSweep() {   // show/hide the rotating sweep line (live)
             p.begin("capsuleradar", false);
             p.putBool("sweep", g_showSweep);
             p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
+static void handleSweepColor() {  // Phosphor/Ripple scan RGB, live + persistent
+    if (g_web.hasArg("rgb")) {
+        const String value = g_web.arg("rgb");
+        char *end = nullptr;
+        const char *raw = value.c_str();
+        const unsigned long rgb = (value.length() == 7 && raw[0] == '#')
+            ? strtoul(raw + 1, &end, 16) : 0x1000000ul;
+        if (end && *end == '\0' && rgb <= 0xFFFFFFul) {
+            radar::setPhosphorScanColor((uint32_t)rgb);
+            if (g_web.hasArg("save")) {
+                Preferences p;
+                p.begin("capsuleradar", false);
+                p.putUInt("sweepcol", (uint32_t)rgb);
+                p.end();
+            }
         }
     }
     g_web.send(200, "text/plain", "ok");
@@ -941,6 +967,7 @@ void setup() {
     g_web.on("/alerts", handleAlerts);
     g_web.on("/idle", handleIdle);
     g_web.on("/sweep", handleSweep);
+    g_web.on("/sweepcolor", handleSweepColor);
     g_web.on("/airports", handleAirports);
     g_web.on("/trail", handleTrail);
     g_web.on("/rotate", handleRotate);
