@@ -195,6 +195,10 @@ void setBrightness(uint8_t v) { if (s_gfx) s_gfx->setBrightness(v); }
 
 void setRotation(uint8_t quarters) {
     s_rot = (uint8_t)(quarters & 3);   // 0..3 = 0°/90°/180°/270°
+    // A rotated panel cannot use the direct QSPI Ripple compositor. Re-apply
+    // the theme so the LVGL fallback is shown immediately, including at boot
+    // where the persisted rotation is restored after the persisted theme.
+    radar::setTheme(radar::theme());
     lv_obj_t *scr = lv_scr_act();
     if (scr) lv_obj_invalidate(scr);   // full repaint in the new orientation
 }

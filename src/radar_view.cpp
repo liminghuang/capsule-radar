@@ -141,7 +141,9 @@ static inline bool orb() { return s_theme == THEME_ORB; }
 static inline bool ripple() { return s_theme == THEME_RIPPLE; }
 #if defined(ESP_PLATFORM)
 static inline bool directRipple(const display::RippleWave *waves, int count) { return display::rippleOverlay(waves, count, s_phosphorScanRgb); }
-static inline bool hasDirectRippleBase() { return display::baseFrame() != nullptr; }
+// The QSPI compositor addresses panel coordinates directly, so rotated displays
+// must keep the LVGL sweep visible as the correctly transformed fallback.
+static inline bool hasDirectRippleBase() { return display::baseFrame() != nullptr && display::rotation() == 0; }
 static inline void clearDirectRipple() { display::clearRippleOverlay(); }
 #else
 static inline bool directRipple(const display::RippleWave *, int) { return false; }
@@ -273,7 +275,7 @@ static void sweep_draw_cb(lv_event_t *e) {
     if (orb()) return;
     lv_draw_ctx_t *dctx = lv_event_get_draw_ctx(e);
     const lv_point_t center = { s_cx, s_cy };
-    const float R = (float)RADAR_R_OUTER_PX;
+    const float R = ripple() ? (float)RIPPLE_R_OUTER_PX : (float)RADAR_R_OUTER_PX;
 
     if (ripple()) {
         lv_draw_arc_dsc_t glow;
@@ -347,7 +349,7 @@ static void wedge_bbox(float deg, lv_area_t *out) {
 static void ripple_bbox(float base, lv_area_t *out) {
     float maxRadius = 0.0f;
     for (int i = 0; i < RIPPLE_WAVES; ++i) {
-        const float radius = ripple_phase(base, i) * (float)RADAR_R_OUTER_PX;
+        const float radius = ripple_phase(base, i) * (float)RIPPLE_R_OUTER_PX;
         if (radius > maxRadius) maxRadius = radius;
     }
     const lv_coord_t pad = RIPPLE_GLOW_WIDTH / 2 + 2;
