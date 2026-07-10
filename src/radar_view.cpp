@@ -58,7 +58,7 @@
 #define SWEEP_TRAIL_OPA   72
 #define RIPPLE_PERIOD_MS  6000  // centre-to-rim travel; half the previous scan speed
 #define RIPPLE_FRAME_MS   40    // 25 FPS target; direct compositor updates only ring spans
-#define RIPPLE_WAVES      1   // reduced from 2 to 1 for better FPS (single wave instead of concurrent waves)
+#define RIPPLE_WAVES      2   // concurrent expanding ring waves
 #define RIPPLE_WIDTH      2
 #define RIPPLE_GLOW_WIDTH RIPPLE_GLOW_WIDTH_PX
 
@@ -143,7 +143,7 @@ static inline bool ripple() { return s_theme == THEME_RIPPLE; }
 static inline bool directRipple(const display::RippleWave *waves, int count) { return display::rippleOverlay(waves, count, s_phosphorScanRgb); }
 // Direct QSPI writes use the panel's native coordinate system. Rotated layouts
 // stay on the LVGL path, which already owns the correct transform.
-static inline bool hasDirectRippleBase() { return display::baseFrame() != nullptr && display::rotation() == 0; }
+static inline bool hasDirectRippleBase() { return display::baseFrame() != nullptr; }
 static inline void clearDirectRipple() { display::clearRippleOverlay(); }
 #else
 static inline bool directRipple(const display::RippleWave *, int) { return false; }
@@ -278,36 +278,28 @@ static void sweep_draw_cb(lv_event_t *e) {
     const float R = ripple() ? (float)RIPPLE_R_OUTER_PX : (float)RADAR_R_OUTER_PX;
 
     if (ripple()) {
-        // Optimized ripple rendering: use line segments instead of full arc
-        // to reduce GPU load (4 segments for 90 degree quadrants)
-        lv_draw_line_dsc_t line;
-        lv_draw_line_dsc_init(&line);
-        line.color = s_cLead;
-        line.width = RIPPLE_WIDTH + 1;
-        line.round_start = 1;
-        line.round_end = 1;
-        
+        lv_draw_arc_dsc_t wave;
+        lv_draw_arc_dsc_init(&wave);
+        wave.color = s_cLead;
+        wave.width = RIPPLE_WIDTH;
+
         for (int i = 0; i < RIPPLE_WAVES; ++i) {
             const float phase = ripple_phase(s_ripplePhase, i);
             const lv_opa_t coreOpa = (lv_opa_t)rippleOpacity(
                 phase, RIPPLE_CORE_OPACITY, RIPPLE_EDGE_OPACITY);
             const lv_coord_t radius = (lv_coord_t)(phase * R);
             if (radius <= 0) continue;
-            
-            line.opa = coreOpa;
-            // Draw with 8 line segments using precomputed quadrant points
-            const lv_point_t quad_offsets[] = {
-                {radius, 0}, {radius*707/1000, radius*707/1000},     // 0-90°
-                {0, radius}, {-radius*707/1000, radius*707/1000},    // 90-180°
-                {-radius, 0}, {-radius*707/1000, -radius*707/1000},  // 180-270°
-                {0, -radius}, {radius*707/1000, -radius*707/1000}    // 270-360°
-            };
-            const int segments = 8;
-            for (int j = 0; j < segments; ++j) {
-                lv_point_t p1 = {s_cx + quad_offsets[j].x, s_cy + quad_offsets[j].y};
-                lv_point_t p2 = {s_cx + quad_offsets[(j+1) % segments].x, s_cy + quad_offsets[(j+1) % segments].y};
-                lv_draw_line(dctx, &line, &p1, &p2);
-            }
+            // Wide, faint halo gives a visible gradient without multiple trail rings.
+#if RIPPLE_GLOW_WIDTH_PX > 0
+            lv_draw_arc_dsc_t glow;
+            lv_draw_arc_dsc_init(&glow);
+            glow.color = s_cLead;
+            glow.width = RIPPLE_GLOW_WIDTH;
+            glow.opa = (lv_opa_t)((coreOpa * RIPPLE_GLOW_OPACITY_PERCENT) / 100);
+            lv_draw_arc(dctx, &glow, &center, radius, 0, 360);
+#endif
+            wave.opa = coreOpa;
+            lv_draw_arc(dctx, &wave, &center, radius, 0, 360);
         }
         return;
     }
@@ -424,10 +416,26 @@ static void sweep_timer_cb(lv_timer_t *t) {
                          rippleOpacity(phase, RIPPLE_CORE_OPACITY, RIPPLE_EDGE_OPACITY) };
         }
         if (directRipple(waves, RIPPLE_WAVES)) {
-            // Direct compositor used - fast path
+            // Compositor active: track its frame rate separately from LVGL's
+            static uint32_t s_compFrames = 0, s_compReportMs = 0;
+            s_compFrames++;
+            const uint32_t cNow = lv_tick_get();
+            if (cNow - s_compReportMs >= 5000) {
+                Serial.printf("[ripple] compositor %.1f FPS (LVGL=aircraft only)\n",
+                              s_compFrames * 1000.0f / (float)(cNow - s_compReportMs));
+                s_compFrames = 0;
+                s_compReportMs = cNow;
+            }
             return;
         }
-        // Fallback to LVGL path: full object invalidation provides better performance
+        // Compositor not available (rotation != 0 or base frame unready).
+        // Log once so we know which path is active.
+        static bool s_pathLogged = false;
+        if (!s_pathLogged) {
+            s_pathLogged = true;
+            Serial.printf("[ripple] LVGL fallback (baseFrame=%p rot=%d)\n",
+                          display::baseFrame(), (int)display::rotation());
+        }
         if (s_sweep) lv_obj_invalidate(s_sweep);
         return;
     }
