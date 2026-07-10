@@ -141,7 +141,9 @@ static inline bool orb() { return s_theme == THEME_ORB; }
 static inline bool ripple() { return s_theme == THEME_RIPPLE; }
 #if defined(ESP_PLATFORM)
 static inline bool directRipple(const display::RippleWave *waves, int count) { return display::rippleOverlay(waves, count, s_phosphorScanRgb); }
-static inline bool hasDirectRippleBase() { return display::baseFrame() != nullptr; }
+// Direct QSPI writes use the panel's native coordinate system. Rotated layouts
+// stay on the LVGL path, which already owns the correct transform.
+static inline bool hasDirectRippleBase() { return display::baseFrame() != nullptr && display::rotation() == 0; }
 static inline void clearDirectRipple() { display::clearRippleOverlay(); }
 #else
 static inline bool directRipple(const display::RippleWave *, int) { return false; }
