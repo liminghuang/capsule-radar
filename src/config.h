@@ -28,12 +28,11 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define RIPPLE_R_OUTER_PX   (SCREEN_CX - 1) // Ripple reaches the physical round-panel edge (232 px)
 #define RIPPLE_CORE_OPACITY 220            // 0..255: bright leading edge at the centre
 #define RIPPLE_EDGE_OPACITY 72             // 0..255: still visibly reaches the physical panel edge
-#define RIPPLE_GLOW_WIDTH_PX 20            // broad halo behind each 2 px ripple edge
+#define RIPPLE_GLOW_WIDTH_PX 0            // disable glow for faster rendering (set to 8+ for visual glow)
 #define RIPPLE_GLOW_OPACITY_PERCENT 42     // halo intensity relative to the ripple edge
-// Disabled until this panel's direct QSPI partial-write path is visually
-// verified across the entire round display. LVGL is slower but renders Ripple
-// correctly at every radius and rotation.
-#define RIPPLE_DIRECT_COMPOSITOR 0
+// Try enabling direct compositor for better ripple performance.
+// If visual artifacts appear, revert this.
+#define RIPPLE_DIRECT_COMPOSITOR 1
 #define LV_COLOR_DEPTH_BITS 16
 #define LCD_COL_OFFSET      6              // CO5300 column (x) gap on this panel (esp_lcd set_gap 0x06)
 #define LCD_ROW_OFFSET      0              // no row (y) gap
