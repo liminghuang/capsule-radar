@@ -53,6 +53,10 @@
 /*=================
    OPERATING SYSTEM
  *=================*/
+/* LV_OS_NONE: Arduino single-threaded. Rendering is driven manually:
+   call lv_draw_dispatch() in the loop to service pending draw tasks.
+   Do NOT use LV_OS_FREERTOS here — it spawns rendering threads that
+   conflict with lv_timer_handler() running in the Arduino loop task. */
 #define LV_USE_OS   LV_OS_NONE
 
 /*=======================

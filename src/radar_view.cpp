@@ -241,6 +241,16 @@ static inline void draw_arc_a(lv_layer_t *layer, lv_draw_arc_dsc_t *d,
     lv_draw_arc(layer, d);
 }
 
+static inline void tri_set_fill(lv_draw_triangle_dsc_t *dsc, lv_color_t color, lv_opa_t opa) {
+#if LV_VERSION_CHECK(9, 5, 0)
+    dsc->color = color;
+    dsc->opa = opa;
+#else
+    dsc->bg_color = color;
+    dsc->bg_opa = opa;
+#endif
+}
+
 static void grid_draw_cb(lv_event_t *e) {
     lv_layer_t *d = lv_event_get_layer(e);
     const lv_point_t c = { s_cx, s_cy };
@@ -266,8 +276,7 @@ static void grid_draw_cb(lv_event_t *e) {
         // v9: lv_draw_polygon removed; use lv_draw_triangle for 3-point shapes
         lv_draw_triangle_dsc_t td;
         lv_draw_triangle_dsc_init(&td);
-        td.color = ORB_ACCENT;
-        td.opa = LV_OPA_COVER;
+        tri_set_fill(&td, ORB_ACCENT, LV_OPA_COVER);
         td.p[0] = { (lv_value_precise_t)tri[0].x, (lv_value_precise_t)tri[0].y };
         td.p[1] = { (lv_value_precise_t)tri[1].x, (lv_value_precise_t)tri[1].y };
         td.p[2] = { (lv_value_precise_t)tri[2].x, (lv_value_precise_t)tri[2].y };
@@ -510,7 +519,7 @@ static void draw_offrange(lv_layer_t *d, const AcDraw &ac) {
                           rot_pt(-5, 4, ac.bearingDeg, ox, oy) };
     lv_draw_triangle_dsc_t td;
     lv_draw_triangle_dsc_init(&td);
-    td.color = ORB_ACCENT; td.opa = LV_OPA_COVER;
+    tri_set_fill(&td, ORB_ACCENT, LV_OPA_COVER);
     td.p[0] = {(lv_value_precise_t)tri[0].x, (lv_value_precise_t)tri[0].y};
     td.p[1] = {(lv_value_precise_t)tri[1].x, (lv_value_precise_t)tri[1].y};
     td.p[2] = {(lv_value_precise_t)tri[2].x, (lv_value_precise_t)tri[2].y};
@@ -547,7 +556,7 @@ static void ac_draw_cb(lv_event_t *e) {
             // v9: lv_draw_polygon removed; split 4-pt glyph into 2 triangles
             lv_draw_triangle_dsc_t g;
             lv_draw_triangle_dsc_init(&g);
-            g.color = ac.color; g.opa = LV_OPA_COVER;
+            tri_set_fill(&g, ac.color, LV_OPA_COVER);
             g.p[0] = {(lv_value_precise_t)pts[0].x, (lv_value_precise_t)pts[0].y};
             g.p[1] = {(lv_value_precise_t)pts[1].x, (lv_value_precise_t)pts[1].y};
             g.p[2] = {(lv_value_precise_t)pts[2].x, (lv_value_precise_t)pts[2].y};

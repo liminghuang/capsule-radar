@@ -31,56 +31,66 @@ uint32_t display_frames() { return s_frameCount; }
 
 static volatile uint8_t s_rot = 0;
 static lv_color_t *s_rotBuf    = nullptr;  // PSRAM scratch for 90/270° transpose
-static lv_color_t *s_baseFrame = nullptr;  // PSRAM scene copy for ripple compositor
+static lv_color_t *s_baseFrame = nullptr;  // PSRAM scene copy for ripple compositor (RGB565)
 static display::RippleWave s_oldRipple[2];
 static int s_oldRippleCount = 0;
-static lv_color_t s_line[SCREEN_W];
+// In LVGL v9, lv_color_t = RGB888 (3 bytes). Our buffers store RGB565 (uint16_t).
+static uint16_t s_line[SCREEN_W];          // temp row buffer for ripple compositor
 static uint8_t s_dirty[SCREEN_W], s_alpha[SCREEN_W];
 
 // LVGL v9 flush callback.  px_map is uint8_t* in v9; cast to lv_color_t* for our code.
 static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
+    // In LVGL v9, lv_color_t is always RGB888 (3 bytes) regardless of LV_COLOR_DEPTH.
+    // The actual pixel format in px_map is determined by lv_display_set_color_format(),
+    // which we set to LV_COLOR_FORMAT_RGB565 → px_map contains 2-byte RGB565 pixels.
+    // All pixel operations must use uint16_t* (NOT lv_color_t*).
     const int w = (int)(area->x2 - area->x1 + 1);
     const int h = (int)(area->y2 - area->y1 + 1);
-    lv_color_t *px  = (lv_color_t *)px_map;
-    lv_color_t *out = px;
+    uint16_t *px  = (uint16_t *)px_map;
+    uint16_t *out = px;
     int16_t  dx = area->x1, dy = area->y1;
     uint16_t dw = (uint16_t)w, dh = (uint16_t)h;
 
-    // Capture logical-coordinate scene BEFORE rotation transform (ripple compositor).
+    // Capture logical-coordinate scene for ripple compositor (RGB565 pixels).
     if (s_baseFrame) {
+        uint16_t *bf = (uint16_t *)s_baseFrame;  // treat baseFrame as RGB565
         for (int row = 0; row < h; ++row)
-            memcpy(s_baseFrame + (area->y1 + row) * SCREEN_W + area->x1,
-                   px + row * w, (size_t)w * sizeof(lv_color_t));
+            memcpy(bf + (area->y1 + row) * SCREEN_W + area->x1,
+                   px + row * w, (size_t)w * sizeof(uint16_t));
     }
 
     switch (s_rot) {
-        case 2:  // 180°
-            for (int i = 0, j = w * h - 1; i < j; ++i, --j) { lv_color_t t = px[i]; px[i] = px[j]; px[j] = t; }
+        case 2: {  // 180°
+            for (int i = 0, j = w * h - 1; i < j; ++i, --j) { uint16_t t = px[i]; px[i] = px[j]; px[j] = t; }
             dx = (int16_t)(SCREEN_W - 1 - area->x2);
             dy = (int16_t)(SCREEN_H - 1 - area->y2);
             break;
-        case 1:  // 90° CW
-            if (s_rotBuf) {
+        }
+        case 1: {  // 90° CW
+            uint16_t *rb = (uint16_t *)s_rotBuf;
+            if (rb) {
                 for (int j = 0; j < h; ++j)
                     for (int i = 0; i < w; ++i)
-                        s_rotBuf[i * h + (h - 1 - j)] = px[j * w + i];
-                out = s_rotBuf; dw = (uint16_t)h; dh = (uint16_t)w;
+                        rb[i * h + (h - 1 - j)] = px[j * w + i];
+                out = rb; dw = (uint16_t)h; dh = (uint16_t)w;
                 dx = (int16_t)(SCREEN_H - 1 - area->y2); dy = area->x1;
             }
             break;
-        case 3:  // 270° CW
-            if (s_rotBuf) {
+        }
+        case 3: {  // 270° CW
+            uint16_t *rb = (uint16_t *)s_rotBuf;
+            if (rb) {
                 for (int j = 0; j < h; ++j)
                     for (int i = 0; i < w; ++i)
-                        s_rotBuf[(w - 1 - i) * h + j] = px[j * w + i];
-                out = s_rotBuf; dw = (uint16_t)h; dh = (uint16_t)w;
+                        rb[(w - 1 - i) * h + j] = px[j * w + i];
+                out = rb; dw = (uint16_t)h; dh = (uint16_t)w;
                 dx = area->y1; dy = (int16_t)(SCREEN_W - 1 - area->x2);
             }
             break;
+        }
         default: break;  // 0°
     }
-    // LV_COLOR_16_SWAP removed in v9; panel uses native RGB565 (no byte-swap).
-    s_gfx->draw16bitRGBBitmap(dx, dy, (uint16_t *)out, dw, dh);
+    s_gfx->draw16bitRGBBitmap(dx, dy, out, dw, dh);
     if (lv_display_flush_is_last(disp)) s_frameCount++;
     lv_display_flush_ready(disp);
 }
@@ -148,6 +158,10 @@ bool begin() {
     // v9: create display object, set buffers and callbacks.
     s_disp = lv_display_create(SCREEN_W, SCREEN_H);
     lv_display_set_flush_cb(s_disp, flush_cb);
+    // Set color format BEFORE set_buffers — v9.2.2 uses the current format to
+    // calculate stride when initialising the draw buffer in set_buffers().
+    // Wrong order → stride=0 or h=0 → buf_act->data_size=0 → refr_timer bails out.
+    lv_display_set_color_format(s_disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_buffers(s_disp, s_buf1, nullptr,
                            buf_px * sizeof(lv_color_t),
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
@@ -156,7 +170,7 @@ bool begin() {
 
     // PSRAM scratch buffer for software 90°/270° rotation transpose.
     s_rotBuf    = (lv_color_t *)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    s_baseFrame = (lv_color_t *)heap_caps_malloc((size_t)SCREEN_W * SCREEN_H * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    s_baseFrame = (lv_color_t *)heap_caps_malloc((size_t)SCREEN_W * SCREEN_H * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
     if (!s_baseFrame) Serial.println("[display] direct Ripple base frame unavailable");
 
     // Touch input (CST9217) -> LVGL pointer indev.
@@ -169,11 +183,16 @@ bool begin() {
 
     Serial.printf("[display] PSRAM free: %u KB\n", (unsigned)(ESP.getFreePsram() / 1024));
     ui_create();
+    lv_draw_dispatch();
     Serial.println("[display] LVGL v9 ready");
     return true;
 }
 
-void loop() { lv_timer_handler(); }
+void loop() {
+    lv_draw_dispatch();
+    lv_refr_now(s_disp);
+    lv_timer_handler();
+}
 
 void setBrightness(uint8_t v) { if (s_gfx) s_gfx->setBrightness(v); }
 
@@ -208,7 +227,14 @@ static void markRing(int16_t y, const RippleWave &wave, bool draw) {
 
 bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
     if (!s_gfx || !s_baseFrame || s_rot != 0 || !waves || count < 1 || count > 2) return false;
-    const lv_color_t color = lv_color_hex(rgb);
+    // baseFrame is stored as RGB565 (uint16_t), matching the display color format.
+    uint16_t *bf   = (uint16_t *)s_baseFrame;
+    uint16_t *line = s_line;  // s_line is now uint16_t
+    // Convert rgb (0xRRGGBB) to RGB565 for blending
+    const uint8_t r = (rgb >> 16) & 0xFF;
+    const uint8_t g = (rgb >> 8) & 0xFF;
+    const uint8_t b = rgb & 0xFF;
+    const uint16_t color565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
     const int16_t yFirst = LV_MAX(0, SCREEN_CY - RIPPLE_R_OUTER_PX - RIPPLE_GLOW_WIDTH_PX);
     const int16_t yLast  = LV_MIN(SCREEN_H - 1, SCREEN_CY + RIPPLE_R_OUTER_PX + RIPPLE_GLOW_WIDTH_PX);
     s_gfx->startWrite();
@@ -224,11 +250,20 @@ bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
                 const int start = dirtyStart & ~1;
                 const int end = LV_MIN(SCREEN_W - 1, (x - 1) | 1);
                 for (int px = start; px <= end; ++px) {
-                    const lv_color_t base = s_baseFrame[y * SCREEN_W + px];
-                    s_line[px - start] = s_dirty[px] && s_alpha[px]
-                        ? lv_color_mix(color, base, s_alpha[px]) : base;
+                    const uint16_t base = bf[y * SCREEN_W + px];
+                    if (s_dirty[px] && s_alpha[px]) {
+                        // Simple alpha blend in RGB565
+                        const uint8_t a = s_alpha[px];
+                        const uint8_t ia = 255 - a;
+                        const uint8_t cr = (((color565 >> 11) * a + (base >> 11) * ia) / 255) & 0x1F;
+                        const uint8_t cg = ((((color565 >> 5) & 0x3F) * a + ((base >> 5) & 0x3F) * ia) / 255) & 0x3F;
+                        const uint8_t cb = (((color565 & 0x1F) * a + (base & 0x1F) * ia) / 255) & 0x1F;
+                        line[px - start] = (cr << 11) | (cg << 5) | cb;
+                    } else {
+                        line[px - start] = base;
+                    }
                 }
-                s_gfx->draw16bitRGBBitmap(start, y, (uint16_t *)s_line, end - start + 1, 1);
+                s_gfx->draw16bitRGBBitmap(start, y, line, end - start + 1, 1);
             }
         }
     }
@@ -240,7 +275,13 @@ bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
 
 void clearRippleOverlay() { s_oldRippleCount = 0; }
 
-uint32_t inactiveMs() { return lv_display_get_inactive_time(nullptr); }
+uint32_t inactiveMs() {
+    // lv_display_get_inactive_time returns a very large value before the first
+    // indev read (no activity recorded yet). Cap it so the idle-dim logic doesn't
+    // fire spuriously on boot.
+    const uint32_t raw = lv_display_get_inactive_time(nullptr);
+    const uint32_t up  = (uint32_t)millis();
+    return (raw > up) ? 0 : raw;   // if inactive > uptime, treat as "just active"
+}
 
 } // namespace display
-
