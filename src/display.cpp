@@ -32,10 +32,13 @@ uint32_t display_frames() { return s_frameCount; }
 static volatile uint8_t s_rot = 0;
 static uint16_t *s_rotBuf    = nullptr;    // PSRAM scratch for 90/270° transpose
 static uint16_t *s_baseFrame = nullptr;    // PSRAM scene copy for ripple compositor (RGB565)
+static bool s_baseRows[SCREEN_H] = {};
+static bool s_baseReady = false;
 static display::RippleWave s_oldRipple[2];
 static int s_oldRippleCount = 0;
 // In LVGL v9, lv_color_t = RGB888 (3 bytes). Our buffers store RGB565 (uint16_t).
-static uint16_t s_line[SCREEN_W];          // temp row buffer for ripple compositor
+#define RIPPLE_TILE_ROWS 16
+static uint16_t s_spanTile[SCREEN_W * RIPPLE_TILE_ROWS];
 static uint8_t s_dirty[SCREEN_W], s_alpha[SCREEN_W];
 
 // LVGL v9 flush callback.  px_map is uint8_t* in v9; cast to lv_color_t* for our code.
@@ -57,6 +60,17 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
         for (int row = 0; row < h; ++row)
             memcpy(bf + (area->y1 + row) * SCREEN_W + area->x1,
                    px + row * w, (size_t)w * sizeof(uint16_t));
+        if (area->x1 == 0 && area->x2 == SCREEN_W - 1) {
+            for (int row = area->y1; row <= area->y2; ++row) {
+                if (row >= 0 && row < SCREEN_H) s_baseRows[row] = true;
+            }
+            if (!s_baseReady) {
+                s_baseReady = true;
+                for (int row = 0; row < SCREEN_H; ++row) {
+                    if (!s_baseRows[row]) { s_baseReady = false; break; }
+                }
+            }
+        }
     }
 
     switch (s_rot) {
@@ -90,7 +104,13 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
         }
         default: break;  // 0°
     }
-    s_gfx->draw16bitRGBBitmap(dx, dy, out, dw, dh);
+    // Arduino_GFX's generic RGB bitmap function writes one QSPI transaction per
+    // pixel. Use the panel's bulk path so LVGL partial flushes and Ripple spans
+    // are transferred as contiguous QSPI payloads instead.
+    s_gfx->startWrite();
+    s_gfx->writeAddrWindow(dx, dy, dw, dh);
+    s_gfx->writePixels(out, (uint32_t)dw * dh);
+    s_gfx->endWrite();
     if (lv_display_flush_is_last(disp)) s_frameCount++;
     lv_display_flush_ready(disp);
 }
@@ -197,12 +217,15 @@ void setBrightness(uint8_t v) { if (s_gfx) s_gfx->setBrightness(v); }
 void setRotation(uint8_t quarters) {
     s_rot = (uint8_t)(quarters & 3);
     s_oldRippleCount = 0;
+    s_baseReady = false;
+    memset(s_baseRows, 0, sizeof(s_baseRows));
     radar::setTheme(radar::theme());
     lv_obj_t *scr = lv_scr_act();
     if (scr) lv_obj_invalidate(scr);
 }
 uint8_t rotation() { return s_rot; }
 const uint16_t *baseFrame() { return s_baseFrame; }
+bool rippleSnapshotReady() { return s_baseFrame && s_baseReady && s_rot == 0; }
 
 static void markSpan(const RippleRowSpans &spans, bool draw, uint8_t alpha) {
     const int16_t starts[2] = {spans.leftStart, spans.rightStart};
@@ -223,11 +246,64 @@ static void markRing(int16_t y, const RippleWave &wave, bool draw) {
     }
 }
 
+struct SpanBounds {
+    int16_t start = SCREEN_W;
+    int16_t end = -1;
+    bool valid() const { return start <= end; }
+};
+
+static void markDirtyRow(int16_t y, const display::RippleWave *waves, int count) {
+    memset(s_dirty, 0, sizeof(s_dirty));
+    memset(s_alpha, 0, sizeof(s_alpha));
+    for (int i = 0; i < s_oldRippleCount; ++i) markRing(y, s_oldRipple[i], false);
+    for (int i = 0; i < count; ++i) markRing(y, waves[i], true);
+}
+
+static void collectBounds(SpanBounds &left, SpanBounds &right) {
+    for (int x = 0; x < SCREEN_W; ++x) {
+        if (!s_dirty[x]) continue;
+        SpanBounds &bounds = x <= SCREEN_CX ? left : right;
+        if (x < bounds.start) bounds.start = x;
+        if (x > bounds.end) bounds.end = x;
+    }
+}
+
+static bool alignBounds(SpanBounds &bounds) {
+    if (!bounds.valid()) return false;
+    bounds.start &= ~1;
+    bounds.end = LV_MIN(SCREEN_W - 1, bounds.end | 1);
+    return true;
+}
+
+static uint16_t blendRipplePixel(uint16_t base, uint16_t color565, uint8_t alpha) {
+    if (!alpha) return base;
+    const uint8_t invAlpha = 255 - alpha;
+    const uint8_t red = (((color565 >> 11) * alpha + (base >> 11) * invAlpha) / 255) & 0x1F;
+    const uint8_t green = ((((color565 >> 5) & 0x3F) * alpha + ((base >> 5) & 0x3F) * invAlpha) / 255) & 0x3F;
+    const uint8_t blue = (((color565 & 0x1F) * alpha + (base & 0x1F) * invAlpha) / 255) & 0x1F;
+    return (red << 11) | (green << 5) | blue;
+}
+
+static void writeSpanTile(int16_t y, int rows, const SpanBounds &bounds,
+                          const display::RippleWave *waves, int count,
+                          uint16_t color565, const uint16_t *baseFrame) {
+    const int width = bounds.end - bounds.start + 1;
+    for (int row = 0; row < rows; ++row) {
+        markDirtyRow(y + row, waves, count);
+        uint16_t *out = s_spanTile + row * width;
+        const uint16_t *base = baseFrame + (y + row) * SCREEN_W + bounds.start;
+        for (int x = 0; x < width; ++x) {
+            out[x] = blendRipplePixel(base[x], color565, s_alpha[bounds.start + x]);
+        }
+    }
+    s_gfx->writeAddrWindow(bounds.start, y, width, rows);
+    s_gfx->writePixels(s_spanTile, (uint32_t)width * rows);
+}
+
 bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
-    if (!s_gfx || !s_baseFrame || s_rot != 0 || !waves || count < 1 || count > 2) return false;
+    if (!s_gfx || !rippleSnapshotReady() || !waves || count < 1 || count > 2) return false;
     // baseFrame is stored as RGB565 (uint16_t), matching the display color format.
-    uint16_t *bf   = (uint16_t *)s_baseFrame;
-    uint16_t *line = s_line;  // s_line is now uint16_t
+    const uint16_t *bf = s_baseFrame;
     // Convert rgb (0xRRGGBB) to RGB565 for blending
     const uint8_t r = (rgb >> 16) & 0xFF;
     const uint8_t g = (rgb >> 8) & 0xFF;
@@ -236,33 +312,21 @@ bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
     const int16_t yFirst = LV_MAX(0, SCREEN_CY - RIPPLE_R_OUTER_PX - RIPPLE_GLOW_WIDTH_PX);
     const int16_t yLast  = LV_MIN(SCREEN_H - 1, SCREEN_CY + RIPPLE_R_OUTER_PX + RIPPLE_GLOW_WIDTH_PX);
     s_gfx->startWrite();
-    for (int16_t y = yFirst; y <= yLast; ++y) {
-        memset(s_dirty, 0, sizeof(s_dirty)); memset(s_alpha, 0, sizeof(s_alpha));
-        for (int i = 0; i < s_oldRippleCount; ++i) markRing(y, s_oldRipple[i], false);
-        for (int i = 0; i < count; ++i) markRing(y, waves[i], true);
-        for (int x = 0; x < SCREEN_W;) {
-            while (x < SCREEN_W && !s_dirty[x]) ++x;
-            const int dirtyStart = x;
-            while (x < SCREEN_W && s_dirty[x]) ++x;
-            if (x > dirtyStart) {
-                const int start = dirtyStart & ~1;
-                const int end = LV_MIN(SCREEN_W - 1, (x - 1) | 1);
-                for (int px = start; px <= end; ++px) {
-                    const uint16_t base = bf[y * SCREEN_W + px];
-                    if (s_dirty[px] && s_alpha[px]) {
-                        // Simple alpha blend in RGB565
-                        const uint8_t a = s_alpha[px];
-                        const uint8_t ia = 255 - a;
-                        const uint8_t cr = (((color565 >> 11) * a + (base >> 11) * ia) / 255) & 0x1F;
-                        const uint8_t cg = ((((color565 >> 5) & 0x3F) * a + ((base >> 5) & 0x3F) * ia) / 255) & 0x3F;
-                        const uint8_t cb = (((color565 & 0x1F) * a + (base & 0x1F) * ia) / 255) & 0x1F;
-                        line[px - start] = (cr << 11) | (cg << 5) | cb;
-                    } else {
-                        line[px - start] = base;
-                    }
-                }
-                s_gfx->draw16bitRGBBitmap(start, y, line, end - start + 1, 1);
-            }
+    for (int16_t y = yFirst; y <= yLast; y += RIPPLE_TILE_ROWS) {
+        const int rows = LV_MIN(RIPPLE_TILE_ROWS, yLast - y + 1);
+        SpanBounds left, right;
+        for (int row = 0; row < rows; ++row) {
+            markDirtyRow(y + row, waves, count);
+            collectBounds(left, right);
+        }
+        const bool haveLeft = alignBounds(left);
+        const bool haveRight = alignBounds(right);
+        if (haveLeft && haveRight && left.end + 1 >= right.start) {
+            left.end = right.end;
+            writeSpanTile(y, rows, left, waves, count, color565, bf);
+        } else {
+            if (haveLeft) writeSpanTile(y, rows, left, waves, count, color565, bf);
+            if (haveRight) writeSpanTile(y, rows, right, waves, count, color565, bf);
         }
     }
     s_gfx->endWrite();

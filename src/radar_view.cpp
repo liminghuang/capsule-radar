@@ -57,7 +57,7 @@
 #define SWEEP_TRAIL_STEPS 20
 #define SWEEP_TRAIL_OPA   72
 #define RIPPLE_PERIOD_MS  6000  // centre-to-rim travel; half the previous scan speed
-#define RIPPLE_FRAME_MS   40    // 25 FPS target; direct compositor updates only ring spans
+#define RIPPLE_FRAME_MS   30    // aligned with the sweep timer; phase still uses elapsed real time
 #define RIPPLE_WAVES      1   // single expanding ring wave
 #define RIPPLE_WIDTH      2
 #define RIPPLE_GLOW_WIDTH RIPPLE_GLOW_WIDTH_PX

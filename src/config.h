@@ -30,9 +30,9 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define RIPPLE_EDGE_OPACITY 150            // 0..255: keep outer ring visible (was 72, too faint)
 #define RIPPLE_GLOW_WIDTH_PX 8             // halo behind each ripple edge (set 0 to disable)
 #define RIPPLE_GLOW_OPACITY_PERCENT 42     // halo intensity relative to the ripple edge
-// The direct compositor is disabled until it is visually validated across the
-// full panel. LVGL's renderer is the correctness baseline for Ripple.
-#define RIPPLE_DIRECT_COMPOSITOR 0
+// Ripple uses a validated RGB565 scene snapshot and sends only its changed
+// annulus spans. It is supported only at the fixed 0° performance orientation.
+#define RIPPLE_DIRECT_COMPOSITOR 1
 #define LV_COLOR_DEPTH_BITS 16
 #define LCD_COL_OFFSET      6              // CO5300 column (x) gap on this panel (esp_lcd set_gap 0x06)
 #define LCD_ROW_OFFSET      0              // no row (y) gap

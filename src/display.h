@@ -30,6 +30,7 @@ uint8_t rotation();
 // Base scene captured from LVGL for the direct Ripple compositor; nullptr when
 // PSRAM allocation failed or when a rotated display mode is active.
 const uint16_t *baseFrame();
+bool rippleSnapshotReady();
 bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb);
 void clearRippleOverlay();
 
