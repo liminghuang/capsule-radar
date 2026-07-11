@@ -520,7 +520,7 @@ static void handleRoot() {
         "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
         "<label><input type=checkbox class=ck %s onchange='ap(this.checked)'>Show airports</label>"
         "<label>Aircraft trails</label><select onchange='tl(this.value)'>%s</select>"
-        "<label>Screen rotation (USB-C position)</label><select onchange='ro(this.value)'>%s</select>"
+        "<label>Screen rotation (fixed to 0&deg; for performance)</label><select disabled>%s</select>"
         "<label>Units</label><select onchange='u(this.value)'>%s</select></div>"
         "<div class=card><div class=t>Brightness schedule</div>"
         "<p style='color:#9affc8;font-size:13px;margin:0 0 6px'>Uses the selected time zone. End time is exclusive; later matching rules take priority.</p>"
@@ -789,9 +789,9 @@ static void handleAirports() {   // show/hide airport markers (live)
     g_web.send(200, "text/plain", "ok");
 }
 
-static void handleRotate() {   // display rotation 0/90/180/270 for any USB-C orientation (live)
+static void handleRotate() {   // retained for old bookmarks; performance mode is fixed at 0°
     if (g_web.hasArg("v")) {
-        g_rotation = constrain((int)g_web.arg("v").toInt(), 0, 3);
+        g_rotation = 0;
         display::setRotation((uint8_t)g_rotation);
         if (g_web.hasArg("save")) {
             Preferences p;
@@ -888,7 +888,7 @@ void setup() {
         const int t = p.getInt("theme", THEME_PHOSPHOR);
         g_showSweep = p.getBool("sweep", true);
         g_showAirports = p.getBool("airports", true);
-        g_rotation = p.getInt("rot", 0);
+        g_rotation = 0;
         p.end();
         radar::setTheme(t);
         radar::setSweepEnabled(g_showSweep);

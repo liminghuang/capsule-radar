@@ -16,7 +16,7 @@
 #define PS_UA "CapsuleRadar/1.0 (+https://github.com/socquique/capsule-radar)"
 
 // JPEG decode target (set just before drawJpg)
-static lv_color_t *s_dst = nullptr;
+static uint16_t *s_dst = nullptr;
 static int s_dstW = 0, s_dstH = 0;
 
 static bool jpg_out(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bmp) {
@@ -26,7 +26,7 @@ static bool jpg_out(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bmp)
         for (int i = 0; i < w; ++i) {
             const int xx = x + i;
             if (xx < 0 || xx >= s_dstW) continue;
-            memcpy(&s_dst[yy * s_dstW + xx], &bmp[j * w + i], 2);   // RGB565 -> lv_color_t
+            s_dst[yy * s_dstW + xx] = bmp[j * w + i];
         }
     }
     return true;
@@ -148,7 +148,7 @@ bool photo_fetch(const char *hex) {
 
     // 3) decode into the shared PSRAM buffer, scaled to fit
     int maxW = 0, maxH = 0;
-    lv_color_t *dst = photo_buffer(&maxW, &maxH);
+    uint16_t *dst = photo_buffer(&maxW, &maxH);
     uint16_t jw = 0, jh = 0;
     if (TJpgDec.getJpgSize(&jw, &jh, img, ilen) != JDR_OK || jw == 0 || jh == 0) {
         Serial.printf("[photo] %s: getJpgSize failed\n", hex);
@@ -159,7 +159,7 @@ bool photo_fetch(const char *hex) {
     s_dstW = (int)(jw / scale); if (s_dstW > maxW) s_dstW = maxW;
     s_dstH = (int)(jh / scale); if (s_dstH > maxH) s_dstH = maxH;
     s_dst = dst;
-    for (int i = 0; i < s_dstW * s_dstH; ++i) memset(&s_dst[i], 0, sizeof(lv_color_t));   // clear
+    memset(s_dst, 0, (size_t)s_dstW * s_dstH * sizeof(uint16_t));
 
     TJpgDec.setJpgScale(scale);
     TJpgDec.setSwapBytes(false);

@@ -24,14 +24,14 @@ static Arduino_CO5300  *s_gfx = nullptr;
 #define LVGL_BUF_LINES 40    // partial draw-buffer height; kept in fast internal RAM
 static lv_display_t  *s_disp  = nullptr;
 static lv_indev_t    *s_indev = nullptr;
-static lv_color_t    *s_buf1  = nullptr;
+static uint16_t      *s_buf1  = nullptr;
 
 static volatile uint32_t s_frameCount = 0;
 uint32_t display_frames() { return s_frameCount; }
 
 static volatile uint8_t s_rot = 0;
-static lv_color_t *s_rotBuf    = nullptr;  // PSRAM scratch for 90/270° transpose
-static lv_color_t *s_baseFrame = nullptr;  // PSRAM scene copy for ripple compositor (RGB565)
+static uint16_t *s_rotBuf    = nullptr;    // PSRAM scratch for 90/270° transpose
+static uint16_t *s_baseFrame = nullptr;    // PSRAM scene copy for ripple compositor (RGB565)
 static display::RippleWave s_oldRipple[2];
 static int s_oldRippleCount = 0;
 // In LVGL v9, lv_color_t = RGB888 (3 bytes). Our buffers store RGB565 (uint16_t).
@@ -149,10 +149,10 @@ bool begin() {
 
     // Draw buffer in INTERNAL DMA RAM (faster than PSRAM for rendering).
     const size_t buf_px = (size_t)SCREEN_W * LVGL_BUF_LINES;
-    s_buf1 = (lv_color_t *)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    s_buf1 = (uint16_t *)heap_caps_malloc(buf_px * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     if (!s_buf1) {
         Serial.println("[display] internal draw buffer failed; falling back to PSRAM");
-        s_buf1 = (lv_color_t *)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+        s_buf1 = (uint16_t *)heap_caps_malloc(buf_px * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
     }
 
     // v9: create display object, set buffers and callbacks.
@@ -163,14 +163,14 @@ bool begin() {
     // Wrong order → stride=0 or h=0 → buf_act->data_size=0 → refr_timer bails out.
     lv_display_set_color_format(s_disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_buffers(s_disp, s_buf1, nullptr,
-                           buf_px * sizeof(lv_color_t),
+                           buf_px * sizeof(uint16_t),
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
     // CO5300 alignment fix: even x-start, odd x-end.
     lv_display_add_event_cb(s_disp, rounder_cb, LV_EVENT_INVALIDATE_AREA, nullptr);
 
     // PSRAM scratch buffer for software 90°/270° rotation transpose.
-    s_rotBuf    = (lv_color_t *)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    s_baseFrame = (lv_color_t *)heap_caps_malloc((size_t)SCREEN_W * SCREEN_H * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+    s_rotBuf    = (uint16_t *)heap_caps_malloc(buf_px * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+    s_baseFrame = (uint16_t *)heap_caps_malloc((size_t)SCREEN_W * SCREEN_H * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
     if (!s_baseFrame) Serial.println("[display] direct Ripple base frame unavailable");
 
     // Touch input (CST9217) -> LVGL pointer indev.
@@ -189,8 +189,6 @@ bool begin() {
 }
 
 void loop() {
-    lv_draw_dispatch();
-    lv_refr_now(s_disp);
     lv_timer_handler();
 }
 
@@ -204,7 +202,7 @@ void setRotation(uint8_t quarters) {
     if (scr) lv_obj_invalidate(scr);
 }
 uint8_t rotation() { return s_rot; }
-const uint16_t *baseFrame() { return (const uint16_t *)s_baseFrame; }
+const uint16_t *baseFrame() { return s_baseFrame; }
 
 static void markSpan(const RippleRowSpans &spans, bool draw, uint8_t alpha) {
     const int16_t starts[2] = {spans.leftStart, spans.rightStart};

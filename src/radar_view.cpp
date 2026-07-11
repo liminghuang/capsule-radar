@@ -139,7 +139,7 @@ static const float GY[4] = { -11.0f, 5.0f, 8.0f, 5.0f };
 
 static inline bool orb() { return s_theme == THEME_ORB; }
 static inline bool ripple() { return s_theme == THEME_RIPPLE; }
-#if defined(ESP_PLATFORM)
+#if defined(ESP_PLATFORM) && RIPPLE_DIRECT_COMPOSITOR
 // directRipple() is gated on hasDirectRippleBase() so that s_sweep visibility
 // (which also depends on hasDirectRippleBase) and the compositor path are always
 // in sync: if the compositor runs, s_sweep is hidden; if not, LVGL arc runs.

@@ -147,7 +147,7 @@ static void refresh_card(void) {
     int pw = 0, ph = 0; char pcred[40];
     if (s_photo && in.hex[0] && photo_get(in.hex, &pw, &ph, pcred, sizeof(pcred)) && pw > 0 && ph > 0) {
         int mw, mh;
-        lv_color_t *pbuf = photo_buffer(&mw, &mh);
+        uint16_t *pbuf = photo_buffer(&mw, &mh);
         lv_canvas_set_buffer(s_photo, pbuf, pw, ph, LV_COLOR_FORMAT_RGB565);
         lv_obj_set_size(s_photo, pw, ph);
         lv_obj_align(s_photo, LV_ALIGN_CENTER, 0, -28 - ph / 2);   // sit lower: fill the band down to the card

@@ -11,18 +11,18 @@
 #define PH_MAXH 156
 
 static std::mutex  s_m;
-static lv_color_t *s_buf = nullptr;
+static uint16_t *s_buf = nullptr;
 static char s_want[10] = "", s_doneHex[10] = "", s_credit[40] = "";
 static int  s_w = 0, s_h = 0;
 static bool s_ready = false;
 
-static lv_color_t *ensure_buf() {
+static uint16_t *ensure_buf() {
     if (!s_buf) {
-        const size_t sz = (size_t)PH_MAXW * PH_MAXH * sizeof(lv_color_t);
+        const size_t sz = (size_t)PH_MAXW * PH_MAXH * sizeof(uint16_t);
 #if defined(ESP_PLATFORM)
-        s_buf = (lv_color_t *)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
+        s_buf = (uint16_t *)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
 #else
-        s_buf = (lv_color_t *)malloc(sz);
+        s_buf = (uint16_t *)malloc(sz);
 #endif
     }
     return s_buf;
@@ -39,7 +39,7 @@ bool photo_pending(char *o, size_t n) {
     return false;
 }
 
-lv_color_t *photo_buffer(int *mw, int *mh) {
+uint16_t *photo_buffer(int *mw, int *mh) {
     if (mw) *mw = PH_MAXW;
     if (mh) *mh = PH_MAXH;
     return ensure_buf();
