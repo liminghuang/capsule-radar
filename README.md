@@ -31,9 +31,9 @@ This fork keeps the upstream project goal and UX, but applies a set of **hardwar
 - **PlatformIO build hardening** for LVGL on this target (including assembly filtering script) to keep builds stable across environments.
 
 <p align="center">
-  <video src="docs/img/fork-demo.mp4" width="360" controls muted playsinline></video>
+  <a href="docs/img/fork-demo.mp4"><img src="docs/img/fork-demo-preview.gif" width="360" alt="Fork demo preview (click to open MP4)"></a>
 </p>
-<p align="center"><sub>Fork demo video (Ripple + styles + brightness scheduling): <a href="docs/img/fork-demo.mp4">open video</a></sub></p>
+<p align="center"><sub>Fork demo preview (click the GIF to open MP4): <a href="docs/img/fork-demo.mp4">open video</a></sub></p>
 
 > Visual reference: open [`assets/plane_radar_2.0_mockup.html`](assets/plane_radar_2.0_mockup.html) in a browser.
 
