@@ -943,8 +943,23 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     s_lastUpdateMs = now;
     s_animStartMs  = now;
 
+    // The Ripple compositor is independent from aircraft data, so a two-second
+    // feed update must not invalidate the complete 466×466 aircraft layer.
+    // Redraw only each former/current glyph area; the interpolation timer keeps
+    // moving contacts invalidated in the same local manner between polls.
+    if (s_acLayer) {
+        for (const AcDraw &ac : s_acs) {
+            const lv_area_t area = glyph_bbox(ac.pos);
+            lv_obj_invalidate_area(s_acLayer, &area);
+        }
+    }
     s_acs = std::move(out);
-    if (s_acLayer) lv_obj_invalidate(s_acLayer);
+    if (s_acLayer) {
+        for (const AcDraw &ac : s_acs) {
+            const lv_area_t area = glyph_bbox(ac.pos);
+            lv_obj_invalidate_area(s_acLayer, &area);
+        }
+    }
 }
 
 int hitTest(int x, int y) {
