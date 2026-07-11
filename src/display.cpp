@@ -37,11 +37,14 @@ static bool s_baseReady = false;
 static display::RippleWave s_oldRipple[2];
 static int s_oldRippleCount = 0;
 static uint32_t s_rippleRgb = 0x39FF14;
-static bool s_restoreRippleAfterFlush = false;
 // In LVGL v9, lv_color_t = RGB888 (3 bytes). Our buffers store RGB565 (uint16_t).
 #define RIPPLE_TILE_ROWS 16
 static uint16_t s_spanTile[SCREEN_W * RIPPLE_TILE_ROWS];
 static uint8_t s_dirty[SCREEN_W], s_alpha[SCREEN_W];
+
+namespace display {
+static void overlayCurrentRippleIntoFlush(uint16_t *px, const lv_area_t *area, int width, int height);
+}
 
 // LVGL v9 flush callback.  px_map is uint8_t* in v9; cast to lv_color_t* for our code.
 static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
@@ -73,6 +76,14 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
                 }
             }
         }
+    }
+
+    // Preserve the direct Ripple in the very same QSPI transaction as an LVGL
+    // scene update. Restoring it after flush still exposes one blank panel frame
+    // to the eye; compositing here keeps the wave continuous through ADS-B data
+    // refreshes while the snapshot above remains ripple-free.
+    if (s_rot == 0 && s_oldRippleCount > 0) {
+        display::overlayCurrentRippleIntoFlush(px, area, w, h);
     }
 
     switch (s_rot) {
@@ -113,17 +124,7 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
     s_gfx->writeAddrWindow(dx, dy, dw, dh);
     s_gfx->writePixels(out, (uint32_t)dw * dh);
     s_gfx->endWrite();
-    // A large LVGL scene update (notably the 2 s ADS-B refresh) overwrites the
-    // direct overlay. Restore the current ring before yielding so it cannot
-    // visibly blink off for a frame.
-    if (s_oldRippleCount > 0 && w * h >= (SCREEN_W * SCREEN_H) / 4) {
-        s_restoreRippleAfterFlush = true;
-    }
     if (lv_display_flush_is_last(disp)) {
-        if (s_restoreRippleAfterFlush && display::rippleSnapshotReady()) {
-            s_restoreRippleAfterFlush = false;
-            display::rippleOverlay(s_oldRipple, s_oldRippleCount, s_rippleRgb);
-        }
         s_frameCount++;
     }
     lv_display_flush_ready(disp);
@@ -305,6 +306,26 @@ static uint16_t blendRipplePixel(uint16_t base, uint16_t color565, uint8_t alpha
     const uint8_t green = ((((color565 >> 5) & 0x3F) * alpha + ((base >> 5) & 0x3F) * invAlpha) / 255) & 0x3F;
     const uint8_t blue = (((color565 & 0x1F) * alpha + (base & 0x1F) * invAlpha) / 255) & 0x1F;
     return (red << 11) | (green << 5) | blue;
+}
+
+static void overlayCurrentRippleIntoFlush(uint16_t *px, const lv_area_t *area, int width, int height) {
+    const uint8_t r = (s_rippleRgb >> 16) & 0xFF;
+    const uint8_t g = (s_rippleRgb >> 8) & 0xFF;
+    const uint8_t b = s_rippleRgb & 0xFF;
+    const uint16_t color565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+    for (int row = 0; row < height; ++row) {
+        const int16_t y = area->y1 + row;
+        memset(s_dirty, 0, sizeof(s_dirty));
+        memset(s_alpha, 0, sizeof(s_alpha));
+        for (int i = 0; i < s_oldRippleCount; ++i) markRing(y, s_oldRipple[i], true);
+        for (int x = area->x1; x <= area->x2; ++x) {
+            const uint8_t alpha = s_alpha[x];
+            if (alpha) {
+                uint16_t &pixel = px[row * width + (x - area->x1)];
+                pixel = blendRipplePixel(pixel, color565, alpha);
+            }
+        }
+    }
 }
 
 static void writeSpanTile(int16_t y, int rows, const SpanBounds &bounds,
