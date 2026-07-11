@@ -36,6 +36,8 @@ static bool s_baseRows[SCREEN_H] = {};
 static bool s_baseReady = false;
 static display::RippleWave s_oldRipple[2];
 static int s_oldRippleCount = 0;
+static uint32_t s_rippleRgb = 0x39FF14;
+static bool s_restoreRippleAfterFlush = false;
 // In LVGL v9, lv_color_t = RGB888 (3 bytes). Our buffers store RGB565 (uint16_t).
 #define RIPPLE_TILE_ROWS 16
 static uint16_t s_spanTile[SCREEN_W * RIPPLE_TILE_ROWS];
@@ -111,7 +113,19 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
     s_gfx->writeAddrWindow(dx, dy, dw, dh);
     s_gfx->writePixels(out, (uint32_t)dw * dh);
     s_gfx->endWrite();
-    if (lv_display_flush_is_last(disp)) s_frameCount++;
+    // A large LVGL scene update (notably the 2 s ADS-B refresh) overwrites the
+    // direct overlay. Restore the current ring before yielding so it cannot
+    // visibly blink off for a frame.
+    if (s_oldRippleCount > 0 && w * h >= (SCREEN_W * SCREEN_H) / 4) {
+        s_restoreRippleAfterFlush = true;
+    }
+    if (lv_display_flush_is_last(disp)) {
+        if (s_restoreRippleAfterFlush && display::rippleSnapshotReady()) {
+            s_restoreRippleAfterFlush = false;
+            display::rippleOverlay(s_oldRipple, s_oldRippleCount, s_rippleRgb);
+        }
+        s_frameCount++;
+    }
     lv_display_flush_ready(disp);
 }
 
@@ -238,8 +252,17 @@ static void markSpan(const RippleRowSpans &spans, bool draw, uint8_t alpha) {
 }
 
 static void markRing(int16_t y, const RippleWave &wave, bool draw) {
-    const RippleRowSpans halo = rippleRowSpans(SCREEN_CX, SCREEN_CY, wave.radius, (float)RIPPLE_GLOW_WIDTH_PX, y, 0, SCREEN_W - 1);
-    if (halo.valid) markSpan(halo, draw, (uint8_t)((wave.opacity * RIPPLE_GLOW_OPACITY_PERCENT) / 100));
+#if RIPPLE_GLOW_WIDTH_PX > 0
+    // Draw broad, faint bands first, then progressively tighter/brighter bands.
+    // markSpan keeps the strongest value at overlaps, producing a radial alpha
+    // gradient without a full-screen alpha buffer.
+    for (int layer = RIPPLE_GLOW_LAYERS; layer >= 1; --layer) {
+        const float width = (float)RIPPLE_GLOW_WIDTH_PX * (float)layer / (float)RIPPLE_GLOW_LAYERS;
+        const uint8_t percent = (uint8_t)((RIPPLE_GLOW_OPACITY_PERCENT * (RIPPLE_GLOW_LAYERS - layer + 1)) / RIPPLE_GLOW_LAYERS);
+        const RippleRowSpans halo = rippleRowSpans(SCREEN_CX, SCREEN_CY, wave.radius, width, y, 0, SCREEN_W - 1);
+        if (halo.valid) markSpan(halo, draw, (uint8_t)((wave.opacity * percent) / 100));
+    }
+#endif
     if (draw) {
         const RippleRowSpans core = rippleRowSpans(SCREEN_CX, SCREEN_CY, wave.radius, 2.0f, y, 0, SCREEN_W - 1);
         if (core.valid) markSpan(core, true, wave.opacity);
@@ -309,6 +332,7 @@ bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
     const uint8_t g = (rgb >> 8) & 0xFF;
     const uint8_t b = rgb & 0xFF;
     const uint16_t color565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+    s_rippleRgb = rgb;
     const int16_t yFirst = LV_MAX(0, SCREEN_CY - RIPPLE_R_OUTER_PX - RIPPLE_GLOW_WIDTH_PX);
     const int16_t yLast  = LV_MIN(SCREEN_H - 1, SCREEN_CY + RIPPLE_R_OUTER_PX + RIPPLE_GLOW_WIDTH_PX);
     s_gfx->startWrite();

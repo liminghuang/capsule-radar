@@ -28,8 +28,9 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define RIPPLE_R_OUTER_PX   (SCREEN_CX - 1) // Ripple reaches the physical round-panel edge (232 px)
 #define RIPPLE_CORE_OPACITY 220            // 0..255: bright leading edge at the centre
 #define RIPPLE_EDGE_OPACITY 150            // 0..255: keep outer ring visible (was 72, too faint)
-#define RIPPLE_GLOW_WIDTH_PX 8             // halo behind each ripple edge (set 0 to disable)
-#define RIPPLE_GLOW_OPACITY_PERCENT 42     // halo intensity relative to the ripple edge
+#define RIPPLE_GLOW_WIDTH_PX 16            // outer radius of the multi-band ripple halo
+#define RIPPLE_GLOW_OPACITY_PERCENT 48     // innermost halo intensity relative to the ripple edge
+#define RIPPLE_GLOW_LAYERS 4               // outer-to-inner alpha bands; preserves a visible gradient
 // Ripple uses a validated RGB565 scene snapshot and sends only its changed
 // annulus spans. It is supported only at the fixed 0° performance orientation.
 #define RIPPLE_DIRECT_COMPOSITOR 1

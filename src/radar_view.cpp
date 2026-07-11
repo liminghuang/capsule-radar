@@ -638,6 +638,7 @@ namespace radar {
 void setTheme(int t) {
     s_theme = ((t % THEME_COUNT) + THEME_COUNT) % THEME_COUNT;
     if (ripple()) { s_lastRippleMs = lv_tick_get(); s_lastRippleFrameMs = 0; }
+    else clearDirectRipple();
     const bool drg = orb();
 
     switch (s_theme) {                          // pick the scope chrome palette
