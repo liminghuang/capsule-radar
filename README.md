@@ -17,6 +17,24 @@
 
 A live **ADS-B aircraft radar** for the **Waveshare ESP32-S3-Touch-AMOLED-1.75** — a round 466×466 AMOLED with capacitive touch. It pulls nearby aircraft from a free online feed over WiFi and plots them on a touch radar scope centered on your location, with live flight details and selectable visual skins.
 
+## Fork highlights (this repo) — differences from upstream
+
+This fork keeps the upstream project goal and UX, but applies a set of **hardware-validated rendering/performance fixes** focused on smooth Ripple animation on the real device:
+
+- **LVGL migrated to v9.2.2** (from the earlier v8 line), with display-path fixes for RGB565 flush correctness on ESP32-S3 AMOLED.
+- **Direct Ripple compositor path** added/optimized: Ripple is composited in the display flush pipeline to keep waves continuous during live aircraft/UI updates.
+- **New visual styles/themes** added and refined (including Ripple mode), with theme behavior tuned for real-device readability and performance.
+- **Water-ripple scan effect** implemented as a first-class scan mode (center-outward wave), with smoother continuity during feed refreshes.
+- **Brightness schedule** added: weekly time-slot rules plus idle dimming, persisted in NVS and configurable from the web UI.
+- **Partial invalidation strategy** for aircraft updates (per-glyph dirty regions instead of full-layer redraw), reducing redraw cost and improving fluidity.
+- **Fixed 0° performance orientation** for the direct Ripple path (web setting shows rotation as fixed/disabled for this optimized mode).
+- **PlatformIO build hardening** for LVGL on this target (including assembly filtering script) to keep builds stable across environments.
+
+<p align="center">
+  <video src="docs/img/fork-demo.mp4" width="360" controls muted playsinline></video>
+</p>
+<p align="center"><sub>Fork demo video (Ripple + styles + brightness scheduling): <a href="docs/img/fork-demo.mp4">open video</a></sub></p>
+
 > Visual reference: open [`assets/plane_radar_2.0_mockup.html`](assets/plane_radar_2.0_mockup.html) in a browser.
 
 <p align="center"><img src="docs/img/radar.gif" width="360" alt="Capsule Radar live scope"></p>
@@ -101,7 +119,7 @@ src/
   adsb_client.*      airplanes.live fetch + parse
   route*.* route.*   origin→destination lookup (adsbdb)
   sim_main.cpp       native SDL simulator (not flashed)
-include/lv_conf.h    LVGL config (v8)
+include/lv_conf.h    LVGL config (v9)
 web/flash/           browser web-flasher (ESP Web Tools) for makers
 scripts/             build_webflasher.sh (merge firmware -> single .bin)
 docs/                hardware / data-source / architecture notes
