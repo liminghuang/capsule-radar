@@ -346,19 +346,16 @@ static void writeSpanTile(int16_t y, int rows, const SpanBounds &bounds,
 
 bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
     if (!s_gfx || !rippleSnapshotReady() || !waves || count < 1 || count > 2) return false;
-    // baseFrame is stored as RGB565 (uint16_t), matching the display color format.
-    const uint16_t *bf = s_baseFrame;
+    const uint16_t *baseFrame = s_baseFrame;
     // Convert rgb (0xRRGGBB) to RGB565 for blending
     const uint8_t r = (rgb >> 16) & 0xFF;
     const uint8_t g = (rgb >> 8) & 0xFF;
     const uint8_t b = rgb & 0xFF;
     const uint16_t color565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
     s_rippleRgb = rgb;
-    const int16_t yFirst = LV_MAX(0, SCREEN_CY - RIPPLE_R_OUTER_PX - RIPPLE_GLOW_WIDTH_PX);
-    const int16_t yLast  = LV_MIN(SCREEN_H - 1, SCREEN_CY + RIPPLE_R_OUTER_PX + RIPPLE_GLOW_WIDTH_PX);
     s_gfx->startWrite();
-    for (int16_t y = yFirst; y <= yLast; y += RIPPLE_TILE_ROWS) {
-        const int rows = LV_MIN(RIPPLE_TILE_ROWS, yLast - y + 1);
+    for (int16_t y = 0; y < SCREEN_H; y += RIPPLE_TILE_ROWS) {
+        const int rows = LV_MIN(RIPPLE_TILE_ROWS, SCREEN_H - y);
         SpanBounds left, right;
         for (int row = 0; row < rows; ++row) {
             markDirtyRow(y + row, waves, count);
@@ -368,10 +365,10 @@ bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
         const bool haveRight = alignBounds(right);
         if (haveLeft && haveRight && left.end + 1 >= right.start) {
             left.end = right.end;
-            writeSpanTile(y, rows, left, waves, count, color565, bf);
+            writeSpanTile(y, rows, left, waves, count, color565, baseFrame);
         } else {
-            if (haveLeft) writeSpanTile(y, rows, left, waves, count, color565, bf);
-            if (haveRight) writeSpanTile(y, rows, right, waves, count, color565, bf);
+            if (haveLeft) writeSpanTile(y, rows, left, waves, count, color565, baseFrame);
+            if (haveRight) writeSpanTile(y, rows, right, waves, count, color565, baseFrame);
         }
     }
     s_gfx->endWrite();
