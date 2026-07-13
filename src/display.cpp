@@ -14,11 +14,96 @@
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
 #include <esp_heap_caps.h>
+#include <driver/spi_master.h>
 #include <string.h>
 
 // --- Arduino_GFX panel -------------------------------------------------------
 static Arduino_DataBus *s_bus = nullptr;
 static Arduino_CO5300  *s_gfx = nullptr;
+
+// Arduino_GFX owns panel initialisation and the CO5300 command sequence.  Its
+// generic pixel path copies every short transfer into a 1K staging buffer and
+// waits synchronously.  The direct Ripple needs a steady full-frame cadence,
+// so use a second, shared SPI device for its payloads.  Two internal-DMA tiles
+// let the CPU prepare one strip while the previous strip is on the QSPI bus.
+#define QSPI_DMA_TILE_ROWS 16
+class QspiDmaWriter {
+public:
+    bool begin() {
+        spi_device_interface_config_t config = {};
+        config.command_bits = 8;
+        config.address_bits = 24;
+        config.mode = SPI_MODE0;
+        config.clock_speed_hz = LCD_QSPI_HZ;
+        config.spics_io_num = -1;       // keep CS low across a complete frame
+        config.flags = SPI_DEVICE_HALFDUPLEX;
+        config.queue_size = 2;
+        if (spi_bus_add_device(SPI2_HOST, &config, &m_handle) != ESP_OK) return false;
+        const size_t bytes = (size_t)SCREEN_W * QSPI_DMA_TILE_ROWS * sizeof(uint16_t);
+        for (int i = 0; i < 2; ++i) {
+            m_tile[i] = (uint16_t *)heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+            if (!m_tile[i]) return false;
+        }
+        pinMode(PIN_LCD_CS, OUTPUT);
+        digitalWrite(PIN_LCD_CS, HIGH);
+        return true;
+    }
+
+    bool ready() const { return m_handle && m_tile[0] && m_tile[1]; }
+    uint16_t *tile(int index) { return m_tile[index]; }
+    int pending() const { return m_pending; }
+
+    bool beginFrame() {
+        if (!ready() || spi_device_acquire_bus(m_handle, portMAX_DELAY) != ESP_OK) return false;
+        m_pending = 0;
+        m_submit = 0;
+        digitalWrite(PIN_LCD_CS, LOW);
+        return true;
+    }
+
+    bool queue(const uint16_t *pixels, size_t count, bool first) {
+        const int slot = m_submit;
+        spi_transaction_ext_t &tx = m_tx[slot];
+        memset(&tx, 0, sizeof(tx));
+        tx.base.flags = SPI_TRANS_MODE_QIO;
+        if (first) {
+            tx.base.cmd = 0x32;
+            tx.base.addr = 0x003C00;
+        } else {
+            tx.base.flags |= SPI_TRANS_VARIABLE_CMD | SPI_TRANS_VARIABLE_ADDR | SPI_TRANS_VARIABLE_DUMMY;
+            tx.command_bits = 0;
+            tx.address_bits = 0;
+            tx.dummy_bits = 0;
+        }
+        tx.base.length = count * 16;
+        tx.base.tx_buffer = pixels;
+        if (spi_device_queue_trans(m_handle, &tx.base, portMAX_DELAY) != ESP_OK) return false;
+        ++m_pending;
+        m_submit = (m_submit + 1) & 1;
+        return true;
+    }
+
+    bool reclaimOne() {
+        spi_transaction_t *done = nullptr;
+        if (spi_device_get_trans_result(m_handle, &done, portMAX_DELAY) != ESP_OK) return false;
+        --m_pending;
+        return true;
+    }
+
+    void endFrame() {
+        while (m_pending) reclaimOne();
+        digitalWrite(PIN_LCD_CS, HIGH);
+        spi_device_release_bus(m_handle);
+    }
+
+private:
+    spi_device_handle_t m_handle = nullptr;
+    spi_transaction_ext_t m_tx[2] = {};
+    uint16_t *m_tile[2] = {};
+    int m_pending = 0;
+    int m_submit = 0;
+};
+static QspiDmaWriter s_dma;
 
 // --- LVGL v9 plumbing --------------------------------------------------------
 #define LVGL_BUF_LINES 40    // partial draw-buffer height; kept in fast internal RAM
@@ -32,6 +117,7 @@ uint32_t display_frames() { return s_frameCount; }
 static volatile uint8_t s_rot = 0;
 static uint16_t *s_rotBuf    = nullptr;    // PSRAM scratch for 90/270° transpose
 static uint16_t *s_baseFrame = nullptr;    // PSRAM scene copy for ripple compositor (RGB565)
+static uint16_t *s_baseWireFrame = nullptr; // same scene in CO5300 big-endian wire order
 static bool s_baseRows[SCREEN_H] = {};
 static bool s_baseReady = false;
 static display::RippleWave s_oldRipple[2];
@@ -44,6 +130,33 @@ static uint8_t s_dirty[SCREEN_W], s_alpha[SCREEN_W];
 
 namespace display {
 static void overlayCurrentRippleIntoFlush(uint16_t *px, const lv_area_t *area, int width, int height);
+}
+
+static bool dmaWriteRgb565(int16_t x, int16_t y, uint16_t w, uint16_t h, const uint16_t *pixels) {
+    if (!s_gfx || !s_dma.ready() || !pixels || !w || !h) return false;
+
+    // CO5300 address commands remain in Arduino_GFX: it has the verified panel
+    // offsets and command encoding.  Pixel payloads immediately following them
+    // are queued through the shared QSPI DMA device.
+    s_gfx->startWrite();
+    s_gfx->writeAddrWindow(x, y, w, h);
+    s_gfx->endWrite();
+    if (!s_dma.beginFrame()) return false;
+
+    bool ok = true;
+    bool first = true;
+    for (uint16_t row = 0; row < h && ok; row += QSPI_DMA_TILE_ROWS) {
+        const uint16_t rows = LV_MIN((uint16_t)QSPI_DMA_TILE_ROWS, (uint16_t)(h - row));
+        uint16_t *out = s_dma.tile((row / QSPI_DMA_TILE_ROWS) & 1);
+        const uint16_t *in = pixels + (size_t)row * w;
+        const size_t count = (size_t)rows * w;
+        for (size_t i = 0; i < count; ++i) out[i] = __builtin_bswap16(in[i]);
+        ok = s_dma.queue(out, count, first);
+        first = false;
+        if (s_dma.pending() == 2 && !s_dma.reclaimOne()) ok = false;
+    }
+    s_dma.endFrame();
+    return ok;
 }
 
 // LVGL v9 flush callback.  px_map is uint8_t* in v9; cast to lv_color_t* for our code.
@@ -60,11 +173,16 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
     uint16_t dw = (uint16_t)w, dh = (uint16_t)h;
 
     // Capture logical-coordinate scene for ripple compositor (RGB565 pixels).
-    if (s_baseFrame) {
+    if (s_baseFrame && s_baseWireFrame) {
         uint16_t *bf = (uint16_t *)s_baseFrame;  // treat baseFrame as RGB565
-        for (int row = 0; row < h; ++row)
+        uint16_t *wf = (uint16_t *)s_baseWireFrame;
+        for (int row = 0; row < h; ++row) {
             memcpy(bf + (area->y1 + row) * SCREEN_W + area->x1,
                    px + row * w, (size_t)w * sizeof(uint16_t));
+            uint16_t *wire = wf + (area->y1 + row) * SCREEN_W + area->x1;
+            const uint16_t *src = px + row * w;
+            for (int col = 0; col < w; ++col) wire[col] = __builtin_bswap16(src[col]);
+        }
         if (area->x1 == 0 && area->x2 == SCREEN_W - 1) {
             for (int row = area->y1; row <= area->y2; ++row) {
                 if (row >= 0 && row < SCREEN_H) s_baseRows[row] = true;
@@ -120,10 +238,12 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
     // Arduino_GFX's generic RGB bitmap function writes one QSPI transaction per
     // pixel. Use the panel's bulk path so LVGL partial flushes and Ripple spans
     // are transferred as contiguous QSPI payloads instead.
-    s_gfx->startWrite();
-    s_gfx->writeAddrWindow(dx, dy, dw, dh);
-    s_gfx->writePixels(out, (uint32_t)dw * dh);
-    s_gfx->endWrite();
+    if (!dmaWriteRgb565(dx, dy, dw, dh, out)) {
+        s_gfx->startWrite();
+        s_gfx->writeAddrWindow(dx, dy, dw, dh);
+        s_gfx->writePixels(out, (uint32_t)dw * dh);
+        s_gfx->endWrite();
+    }
     if (lv_display_flush_is_last(disp)) {
         s_frameCount++;
     }
@@ -166,7 +286,8 @@ namespace display {
 bool begin() {
     Serial.println("[display] init CO5300 QSPI...");
     s_bus = new Arduino_ESP32QSPI(PIN_LCD_CS, PIN_LCD_SCLK,
-                                  PIN_LCD_D0, PIN_LCD_D1, PIN_LCD_D2, PIN_LCD_D3);
+                                  PIN_LCD_D0, PIN_LCD_D1, PIN_LCD_D2, PIN_LCD_D3,
+                                  true /* shared with QSPI DMA pixel writer */);
     s_gfx = new Arduino_CO5300(s_bus, PIN_LCD_RST, 0 /*rotation*/,
                                SCREEN_W, SCREEN_H,
                                LCD_COL_OFFSET, LCD_ROW_OFFSET, 0, 0);
@@ -176,6 +297,11 @@ bool begin() {
     }
     s_gfx->fillScreen(RGB565_BLACK);
     s_gfx->setBrightness(BRIGHTNESS_DEFAULT);
+    if (s_dma.begin()) {
+        Serial.println("[display] QSPI DMA pixel writer ready");
+    } else {
+        Serial.println("[display] QSPI DMA unavailable; using Arduino_GFX fallback");
+    }
     Serial.println("[display] panel up; init LVGL v9...");
 
     lv_init();
@@ -206,7 +332,8 @@ bool begin() {
     // PSRAM scratch buffer for software 90°/270° rotation transpose.
     s_rotBuf    = (uint16_t *)heap_caps_malloc(buf_px * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
     s_baseFrame = (uint16_t *)heap_caps_malloc((size_t)SCREEN_W * SCREEN_H * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-    if (!s_baseFrame) Serial.println("[display] direct Ripple base frame unavailable");
+    s_baseWireFrame = (uint16_t *)heap_caps_malloc((size_t)SCREEN_W * SCREEN_H * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+    if (!s_baseFrame || !s_baseWireFrame) Serial.println("[display] direct Ripple base frame unavailable");
 
     // Touch input (CST9217) -> LVGL pointer indev.
     if (touch_begin()) {
@@ -240,7 +367,7 @@ void setRotation(uint8_t quarters) {
 }
 uint8_t rotation() { return s_rot; }
 const uint16_t *baseFrame() { return s_baseFrame; }
-bool rippleSnapshotReady() { return s_baseFrame && s_baseReady && s_rot == 0; }
+bool rippleSnapshotReady() { return s_baseFrame && s_baseWireFrame && s_baseReady && s_rot == 0; }
 
 static void markSpan(const RippleRowSpans &spans, bool draw, uint8_t alpha) {
     const int16_t starts[2] = {spans.leftStart, spans.rightStart};
@@ -308,6 +435,47 @@ static uint16_t blendRipplePixel(uint16_t base, uint16_t color565, uint8_t alpha
     return (red << 11) | (green << 5) | blue;
 }
 
+// Fixed-cost 0° Ripple presenter.  Unlike the legacy annulus-span writer, its
+// transfer size does not grow with radius: every tick streams the same 466x466
+// RGB565 frame through two DMA tiles.  That removes the visible slowdown near
+// the edge while retaining the existing per-pixel halo calculation.
+static bool dmaPresentRipple(const display::RippleWave *waves, int count, uint16_t color565) {
+    s_gfx->startWrite();
+    s_gfx->writeAddrWindow(0, 0, SCREEN_W, SCREEN_H);
+    s_gfx->endWrite();
+    if (!s_dma.beginFrame()) return false;
+
+    bool ok = true;
+    bool first = true;
+    for (int16_t y = 0; y < SCREEN_H && ok; y += QSPI_DMA_TILE_ROWS) {
+        const int rows = LV_MIN(QSPI_DMA_TILE_ROWS, SCREEN_H - y);
+        uint16_t *out = s_dma.tile((y / QSPI_DMA_TILE_ROWS) & 1);
+        for (int row = 0; row < rows; ++row) {
+            const int16_t py = y + row;
+            memset(s_dirty, 0, sizeof(s_dirty));
+            memset(s_alpha, 0, sizeof(s_alpha));
+            for (int wave = 0; wave < count; ++wave) markRing(py, waves[wave], true);
+            const uint16_t *base = s_baseFrame + (size_t)py * SCREEN_W;
+            const uint16_t *baseWire = s_baseWireFrame + (size_t)py * SCREEN_W;
+            uint16_t *dst = out + (size_t)row * SCREEN_W;
+            // The unchanged scene is already byte-swapped for the CO5300, so
+            // a row copy replaces 466 per-pixel swaps. Only halo/core pixels
+            // need the comparatively expensive RGB565 alpha blend.
+            memcpy(dst, baseWire, (size_t)SCREEN_W * sizeof(uint16_t));
+            for (int x = 0; x < SCREEN_W; ++x) {
+                if (s_dirty[x]) dst[x] = __builtin_bswap16(blendRipplePixel(base[x], color565, s_alpha[x]));
+            }
+        }
+        ok = s_dma.queue(out, (size_t)rows * SCREEN_W, first);
+        first = false;
+        if (s_dma.pending() == 2) {
+            if (!s_dma.reclaimOne()) ok = false;
+        }
+    }
+    s_dma.endFrame();
+    return ok;
+}
+
 static void overlayCurrentRippleIntoFlush(uint16_t *px, const lv_area_t *area, int width, int height) {
     const uint8_t r = (s_rippleRgb >> 16) & 0xFF;
     const uint8_t g = (s_rippleRgb >> 8) & 0xFF;
@@ -353,6 +521,14 @@ bool rippleOverlay(const RippleWave *waves, int count, uint32_t rgb) {
     const uint8_t b = rgb & 0xFF;
     const uint16_t color565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
     s_rippleRgb = rgb;
+    if (s_dma.ready()) {
+        if (!dmaPresentRipple(waves, count, color565)) return false;
+        s_oldRippleCount = count;
+        for (int i = 0; i < count; ++i) s_oldRipple[i] = waves[i];
+        return true;
+    }
+
+    // Fallback for a failed DMA initialisation: preserve the prior span path.
     s_gfx->startWrite();
     for (int16_t y = 0; y < SCREEN_H; y += RIPPLE_TILE_ROWS) {
         const int rows = LV_MIN(RIPPLE_TILE_ROWS, SCREEN_H - y);

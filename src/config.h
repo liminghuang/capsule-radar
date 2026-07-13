@@ -34,6 +34,8 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 // Ripple uses a validated RGB565 scene snapshot and sends only its changed
 // annulus spans. It is supported only at the fixed 0° performance orientation.
 #define RIPPLE_DIRECT_COMPOSITOR 1
+#define AIRCRAFT_MISSING_FADE_POLLS 2     // retain a transiently missing contact, then fade it out
+#define RIPPLE_LABEL_OFFSET_X 9           // callsign offset from the aircraft glyph centre
 #define LV_COLOR_DEPTH_BITS 16
 #define LCD_COL_OFFSET      6              // CO5300 column (x) gap on this panel (esp_lcd set_gap 0x06)
 #define LCD_ROW_OFFSET      0              // no row (y) gap

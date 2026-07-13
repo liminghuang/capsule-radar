@@ -82,6 +82,9 @@ static lv_obj_t  *s_parent   = nullptr;
 static lv_obj_t  *s_gridLayer = nullptr;
 static lv_obj_t  *s_sweep     = nullptr;
 static lv_obj_t  *s_acLayer   = nullptr;
+static lv_obj_t  *s_labelLayer = nullptr;
+static lv_obj_t  *s_callLabels[20] = {};
+static lv_obj_t  *s_altLabels[20] = {};
 static lv_obj_t  *s_flowCanvas = nullptr;
 static lv_color_t *s_flowBuf  = nullptr;
 static lv_obj_t  *s_rose[4]   = {nullptr, nullptr, nullptr, nullptr};
@@ -111,12 +114,15 @@ static std::string s_selHex;
 
 struct FlowSeg { lv_point_t a, b; uint16_t gen; };   // gen = the poll it was laid down on
 static std::deque<FlowSeg> s_flow;
+struct PendingInvalidation { lv_area_t area; bool labels; };
+static std::deque<PendingInvalidation> s_rippleInvalidations;
 static int s_flowRedrawCtr = 0;
 static uint16_t s_flowGen = 0;        // ++ each update(); flow segments fade out after s_flowGenMax polls
 
 struct AcDraw {
     lv_point_t pos;            // current (animated) screen position — what gets drawn
     lv_point_t from, to;       // smooth-motion glide endpoints (M4 interpolation)
+    lv_point_t labelPos;       // confirmed text anchor; decoupled from fast Ripple icon motion
     float      track;
     lv_color_t color;
     bool       emergency;
@@ -129,10 +135,12 @@ struct AcDraw {
     bool       onGround;
     float      vsFpm, gsKt, distKm, bearingDeg;
     int        squawk;
+    uint8_t    missingPolls = 0;  // retained only briefly when a feed snapshot omits this contact
     std::vector<lv_point_t> trail;
 };
 static std::vector<AcDraw> s_acs;
 static std::map<std::string, std::vector<lv_point_t>> s_trails;
+static void syncLabelPool();
 
 static const float GX[4] = { 0.0f,  7.0f, 0.0f, -7.0f };
 static const float GY[4] = { -11.0f, 5.0f, 8.0f, 5.0f };
@@ -377,6 +385,17 @@ static inline lv_area_t glyph_bbox(lv_point_t p) {
     else          { a.x1 = p.x - 22; a.y1 = p.y - 22; a.x2 = p.x + 148; a.y2 = p.y + 26; }
     return a;
 }
+// Plane motion needs only the glyph, emergency ring, and short trailing tip.
+// Keeping labels out of this hot path lets Ripple animate positions without a
+// large 170px-wide text redraw for every aircraft.
+static inline lv_area_t motion_bbox(lv_point_t p) {
+    return { (lv_coord_t)(p.x - 24), (lv_coord_t)(p.y - 24),
+             (lv_coord_t)(p.x + 24), (lv_coord_t)(p.y + 24) };
+}
+static inline lv_area_t label_bbox(lv_point_t p) {
+    return { (lv_coord_t)(p.x + RIPPLE_LABEL_OFFSET_X - 4), (lv_coord_t)(p.y - 18),
+             (lv_coord_t)(p.x + RIPPLE_LABEL_OFFSET_X + 130), (lv_coord_t)(p.y + 24) };
+}
 static inline void area_union(lv_area_t &d, const lv_area_t &s) {
     d.x1 = LV_MIN(d.x1, s.x1); d.y1 = LV_MIN(d.y1, s.y1);
     d.x2 = LV_MAX(d.x2, s.x2); d.y2 = LV_MAX(d.y2, s.y2);
@@ -397,17 +416,35 @@ static void interp_step(void) {
         const lv_coord_t ny = ac.from.y + (lv_coord_t)lroundf((float)(ac.to.y - ac.from.y) * e);
         if (nx == ac.pos.x && ny == ac.pos.y) continue;
         lv_point_t np; np.x = nx; np.y = ny;
-        lv_area_t inv = glyph_bbox(ac.pos);
-        area_union(inv, glyph_bbox(np));
+        lv_area_t inv = ripple() ? motion_bbox(ac.pos) : glyph_bbox(ac.pos);
+        area_union(inv, ripple() ? motion_bbox(np) : glyph_bbox(np));
         ac.pos = np;
         lv_obj_invalidate_area(s_acLayer, &inv);
     }
 #endif
 }
 
+static void invalidateGlyphArea(const lv_area_t &area) {
+    if (!s_acLayer) return;
+    if (ripple()) s_rippleInvalidations.push_back({area, false});
+    else lv_obj_invalidate_area(s_acLayer, &area);
+}
+
+static void invalidateLabelArea(const lv_area_t &area) {
+    (void)area; // legacy custom text layer is hidden; LVGL label objects own text invalidation.
+}
+
+static void drainRippleInvalidation() {
+    if (!ripple() || s_rippleInvalidations.empty()) return;
+    const PendingInvalidation pending = s_rippleInvalidations.front();
+    lv_obj_t *layer = pending.labels ? s_labelLayer : s_acLayer;
+    if (layer) lv_obj_invalidate_area(layer, &pending.area);
+    s_rippleInvalidations.pop_front();
+}
+
 static void sweep_timer_cb(lv_timer_t *t) {
     (void)t;
-    if (++s_frameCtr % 3 == 0) interp_step();         // smooth glyph motion (~90 ms cadence)
+    if (++s_frameCtr % 3 == 0) interp_step(); // glyphs interpolate in every theme
     if (orb()) {
         // animate the blip waves (invalidate only the ball areas)
         s_wavePhase += 0.05f;
@@ -440,6 +477,10 @@ static void sweep_timer_cb(lv_timer_t *t) {
             waves[i] = { phase * (float)RIPPLE_R_OUTER_PX,
                          rippleOpacity(phase, RIPPLE_CORE_OPACITY, RIPPLE_EDGE_OPACITY) };
         }
+        // A compact glyph refresh is still costlier than a pure Ripple DMA
+        // frame.  At one every 90 ms, a 20-contact snapshot clears before the
+        // next two-second poll without creating a burst of consecutive stalls.
+        if (s_frameCtr % 3 == 0) drainRippleInvalidation();
         if (directRipple(waves, RIPPLE_WAVES)) {
             return;
         }
@@ -526,12 +567,18 @@ static void draw_offrange(lv_layer_t *d, const AcDraw &ac) {
     lv_draw_triangle(d, &td);
 }
 
+static lv_opa_t contactOpacity(const AcDraw &ac) {
+    if (!ac.missingPolls) return LV_OPA_COVER;
+    return ac.missingPolls == 1 ? 150 : 70;
+}
+
 static void ac_draw_cb(lv_event_t *e) {
     lv_layer_t *d = lv_event_get_layer(e);
     const bool drg = orb();
     int balls = 0, arrows = 0;
 
     for (const AcDraw &ac : s_acs) {
+        const lv_opa_t opacity = contactOpacity(ac);
         if (drg) {
             if (ac.inRange) {
                 if (balls >= ORB_BLIPS) continue;
@@ -556,7 +603,7 @@ static void ac_draw_cb(lv_event_t *e) {
             // v9: lv_draw_polygon removed; split 4-pt glyph into 2 triangles
             lv_draw_triangle_dsc_t g;
             lv_draw_triangle_dsc_init(&g);
-            tri_set_fill(&g, ac.color, LV_OPA_COVER);
+            tri_set_fill(&g, ac.color, opacity);
             g.p[0] = {(lv_value_precise_t)pts[0].x, (lv_value_precise_t)pts[0].y};
             g.p[1] = {(lv_value_precise_t)pts[1].x, (lv_value_precise_t)pts[1].y};
             g.p[2] = {(lv_value_precise_t)pts[2].x, (lv_value_precise_t)pts[2].y};
@@ -567,7 +614,7 @@ static void ac_draw_cb(lv_event_t *e) {
             if (ac.emergency) {
                 lv_draw_arc_dsc_t h;
                 lv_draw_arc_dsc_init(&h);
-                h.color = COL_EMERG; h.width = 2; h.opa = 200;
+                h.color = COL_EMERG; h.width = 2; h.opa = (lv_opa_t)((200 * opacity) / 255);
                 draw_arc(d, &h, ac.pos, 16);
             }
         }
@@ -587,20 +634,34 @@ static void ac_draw_cb(lv_event_t *e) {
             }
         }
 
-        // floating labels (phosphor only)
-        if (!drg) {
-            lv_draw_label_dsc_t lc;
-            lv_draw_label_dsc_init(&lc);
-            lc.font = &lv_font_montserrat_14; lc.color = s_cInk;
-            lv_area_t a1 = { (int32_t)(ac.pos.x + 12), (int32_t)(ac.pos.y - 14),
-                             (int32_t)(ac.pos.x + 142), (int32_t)(ac.pos.y + 2) };
-            if (ac.call[0]) { lc.text = ac.call; lv_draw_label(d, &lc, &a1); }
-            lv_draw_label_dsc_t la;
-            lv_draw_label_dsc_init(&la);
-            la.font = &lv_font_montserrat_12; la.color = ac.color;
-            lv_area_t a2 = { a1.x1, (int32_t)(ac.pos.y + 2), a1.x2, (int32_t)(ac.pos.y + 20) };
-            if (ac.altTxt[0]) { la.text = ac.altTxt; lv_draw_label(d, &la, &a2); }
-        }
+    }
+}
+
+// Callsigns live on their own transparent layer. This prevents the tiny icon
+// redraw rectangles used by Ripple motion from clipping a label mid-glyph.
+static void label_draw_cb(lv_event_t *e) {
+    if (orb()) return;
+    lv_layer_t *d = lv_event_get_layer(e);
+    for (const AcDraw &ac : s_acs) {
+        if (!ac.inRange) continue;
+        const lv_point_t p = ripple() ? ac.labelPos : ac.pos;
+        const int offset = ripple() ? RIPPLE_LABEL_OFFSET_X : 12;
+        const lv_opa_t opacity = contactOpacity(ac);
+        lv_area_t a1 = { (int32_t)(p.x + offset), (int32_t)(p.y - 14),
+                         (int32_t)(p.x + offset + 130), (int32_t)(p.y + 2) };
+        lv_draw_label_dsc_t call;
+        lv_draw_label_dsc_init(&call);
+        call.font = &lv_font_montserrat_14;
+        call.color = s_cInk;
+        call.opa = opacity;
+        if (ac.call[0]) { call.text = ac.call; lv_draw_label(d, &call, &a1); }
+        lv_draw_label_dsc_t alt;
+        lv_draw_label_dsc_init(&alt);
+        alt.font = &lv_font_montserrat_12;
+        alt.color = ac.color;
+        alt.opa = opacity;
+        lv_area_t a2 = { a1.x1, (int32_t)(p.y + 2), a1.x2, (int32_t)(p.y + 20) };
+        if (ac.altTxt[0]) { alt.text = ac.altTxt; lv_draw_label(d, &alt, &a2); }
     }
 }
 
@@ -613,6 +674,32 @@ static lv_obj_t *make_label(lv_obj_t *parent, const char *txt, const lv_font_t *
     lv_obj_set_style_text_color(l, color, 0);
     lv_obj_align(l, align, dx, dy);
     return l;
+}
+
+static void syncLabelPool() {
+    const bool visible = !orb();
+    for (int i = 0; i < 20; ++i) {
+        const bool use = visible && i < (int)s_acs.size() && s_acs[i].inRange;
+        if (!s_callLabels[i] || !s_altLabels[i]) continue;
+        if (!use) {
+            lv_obj_add_flag(s_callLabels[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_altLabels[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        const AcDraw &ac = s_acs[i];
+        const lv_point_t p = ripple() ? ac.labelPos : ac.pos;
+        const int offset = ripple() ? RIPPLE_LABEL_OFFSET_X : 12;
+        lv_label_set_text(s_callLabels[i], ac.call);
+        lv_label_set_text(s_altLabels[i], ac.altTxt);
+        lv_obj_set_style_text_color(s_callLabels[i], s_cInk, 0);
+        lv_obj_set_style_text_color(s_altLabels[i], ac.color, 0);
+        lv_obj_set_style_text_opa(s_callLabels[i], contactOpacity(ac), 0);
+        lv_obj_set_style_text_opa(s_altLabels[i], contactOpacity(ac), 0);
+        lv_obj_set_pos(s_callLabels[i], p.x + offset, p.y - 14);
+        lv_obj_set_pos(s_altLabels[i], p.x + offset, p.y + 2);
+        lv_obj_remove_flag(s_callLabels[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_altLabels[i], LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static lv_obj_t *make_layer(lv_obj_t *parent, lv_event_cb_t draw_cb) {
@@ -638,7 +725,7 @@ namespace radar {
 void setTheme(int t) {
     s_theme = ((t % THEME_COUNT) + THEME_COUNT) % THEME_COUNT;
     if (ripple()) { s_lastRippleMs = lv_tick_get(); s_lastRippleFrameMs = 0; }
-    else clearDirectRipple();
+    else { clearDirectRipple(); s_rippleInvalidations.clear(); }
     const bool drg = orb();
 
     switch (s_theme) {                          // pick the scope chrome palette
@@ -669,6 +756,12 @@ void setTheme(int t) {
     show(s_centerDot, !drg);                             // orb draws an orange triangle instead
     show(s_pulse, !drg);
     show(s_sweep, s_sweepEnabled && !(ripple() && hasDirectRippleBase()));
+    show(s_labelLayer, false);
+    // Canvas drawing always invalidates the canvas's entire 466x466 object in
+    // LVGL 9.  Hide/freeze the optional persistent flow map in Ripple mode;
+    // aircraft still retain their normal short trails on s_acLayer, while the
+    // full-canvas repaint can no longer interrupt the fixed-rate wave.
+    show(s_flowCanvas, !ripple());
 
     // retint the persistent chrome objects for the active palette
     if (s_rose[0]) lv_obj_set_style_text_color(s_rose[0], s_cInk, 0);
@@ -677,8 +770,9 @@ void setTheme(int t) {
     if (s_pulse)     lv_obj_set_style_border_color(s_pulse, s_cInk, 0);
     if (s_rangeLbl)  lv_obj_set_style_text_color(s_rangeLbl, s_cRing, 0);
 
-    flow_redraw_all();
+    if (!ripple()) flow_redraw_all();
     if (s_parent) lv_obj_invalidate(s_parent);
+    syncLabelPool();
     if (s_themeCb) s_themeCb(s_theme);
 }
 
@@ -732,6 +826,7 @@ void init(void *lv_parent) {
     s_acs.clear();
     s_trails.clear();
     s_flow.clear();
+    s_rippleInvalidations.clear();
     s_selHex.clear();
     s_flowRedrawCtr = 0;
 
@@ -758,6 +853,18 @@ void init(void *lv_parent) {
     s_gridLayer = make_layer(parent, grid_draw_cb);
     s_sweep     = make_layer(parent, sweep_draw_cb);
     s_acLayer   = make_layer(parent, ac_draw_cb);
+    s_labelLayer = make_layer(parent, label_draw_cb);
+    lv_obj_add_flag(s_labelLayer, LV_OBJ_FLAG_HIDDEN); // superseded by real LVGL label objects below
+    for (int i = 0; i < 20; ++i) {
+        s_callLabels[i] = lv_label_create(parent);
+        s_altLabels[i] = lv_label_create(parent);
+        lv_obj_set_style_text_font(s_callLabels[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(s_altLabels[i], &lv_font_montserrat_12, 0);
+        lv_obj_clear_flag(s_callLabels[i], (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+        lv_obj_clear_flag(s_altLabels[i], (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+        lv_obj_add_flag(s_callLabels[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_altLabels[i], LV_OBJ_FLAG_HIDDEN);
+    }
 
     s_rose[0] = make_label(parent, "N", &lv_font_montserrat_28, COL_INK,  LV_ALIGN_TOP_MID,    0, 12);
     s_rose[1] = make_label(parent, "S", &lv_font_montserrat_16, COL_SOFT, LV_ALIGN_BOTTOM_MID, 0, -12);
@@ -859,7 +966,9 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
         d.pos = target;
         d.from = target;
 #endif
+        d.labelPos = target;
         d.inRange = p.inRange;
+        d.missingPolls = 0;
         d.track = ac.track;
         d.color = alt_color(ac.altBaro, ac.onGround);
         d.emergency = acIsEmergency(ac.squawk);
@@ -888,7 +997,7 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
                     FlowSeg seg = { hist.back(), target, s_flowGen };
                     s_flow.push_back(seg);
                     while ((int)s_flow.size() > s_flowMax) s_flow.pop_front();
-                    flow_draw_seg(seg);
+                    if (!ripple()) flow_draw_seg(seg);
                 }
                 if (s_trailMax > 0) {
                     hist.push_back(target);
@@ -917,17 +1026,33 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
             s_flow.pop_front();
             pruned = true;
         }
-        if (pruned) flow_redraw_all();
+        if (pruned && !ripple()) flow_redraw_all();
     }
 
     // nearest first (the blips + the list); cap to keep work bounded
     std::sort(out.begin(), out.end(),
               [](const AcDraw &a, const AcDraw &b) { return a.distKm < b.distKm; });
     if (out.size() > 20) out.resize(20);
+    // Feed coverage can omit an otherwise valid contact for a poll or two.
+    // Keep it at the last known position and fade it before removing it, rather
+    // than making it blink out the moment a single REST response omits it.
+    if (out.size() < 20) {
+        std::set<std::string> current;
+        for (const AcDraw &ac : out) current.insert(ac.hex);
+        for (const AcDraw &old : s_acs) {
+            if (out.size() >= 20 || current.count(old.hex) ||
+                old.missingPolls >= AIRCRAFT_MISSING_FADE_POLLS) continue;
+            AcDraw retained = old;
+            ++retained.missingPolls;
+            retained.from = retained.pos;
+            retained.to = retained.pos;
+            out.push_back(std::move(retained));
+        }
+    }
 
     if (++s_flowRedrawCtr >= FLOW_REDRAW_EVERY) {
         s_flowRedrawCtr = 0;
-        flow_redraw_all();
+        if (!ripple()) flow_redraw_all();
     }
 
     if (s_rangeLbl) {                                 // keep the range label in sync with settings
@@ -943,23 +1068,51 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     s_lastUpdateMs = now;
     s_animStartMs  = now;
 
-    // The Ripple compositor is independent from aircraft data, so a two-second
-    // feed update must not invalidate the complete 466×466 aircraft layer.
-    // Redraw only each former/current glyph area; the interpolation timer keeps
-    // moving contacts invalidated in the same local manner between polls.
-    if (s_acLayer) {
+    // In Ripple mode, one union per contact clears its prior glyph and draws
+    // its new glyph.  Queuing old and new bounds separately doubles the LVGL
+    // work and can overflow its invalid-area list on a busy snapshot.
+    if (ripple()) {
+        struct OldContactArea { lv_area_t icon; lv_area_t label; };
+        std::map<std::string, OldContactArea> oldAreas;
         for (const AcDraw &ac : s_acs) {
-            const lv_area_t area = glyph_bbox(ac.pos);
-            lv_obj_invalidate_area(s_acLayer, &area);
+            oldAreas[ac.hex] = { motion_bbox(ac.pos), label_bbox(ac.labelPos) };
+        }
+        s_acs = std::move(out);
+        for (const AcDraw &ac : s_acs) {
+            auto old = oldAreas.find(ac.hex);
+            if (old != oldAreas.end()) {
+                // Never union distant old/new labels: a diagonal flight would
+                // turn that into a nearly full-screen refresh. Clear and draw
+                // the two compact label rectangles as separate queued updates.
+                invalidateLabelArea(old->second.label);
+                oldAreas.erase(old);
+            } else {
+                invalidateGlyphArea(motion_bbox(ac.pos));
+            }
+            invalidateLabelArea(label_bbox(ac.labelPos));
+        }
+        for (const auto &old : oldAreas) {
+            invalidateGlyphArea(old.second.icon);
+            invalidateLabelArea(old.second.label);
+        }
+    } else {
+        if (s_acLayer) {
+            for (const AcDraw &ac : s_acs) {
+                const lv_area_t area = glyph_bbox(ac.pos);
+                invalidateGlyphArea(area);
+                invalidateLabelArea(label_bbox(ac.pos));
+            }
+        }
+        s_acs = std::move(out);
+        if (s_acLayer) {
+            for (const AcDraw &ac : s_acs) {
+                const lv_area_t area = glyph_bbox(ac.pos);
+                invalidateGlyphArea(area);
+                invalidateLabelArea(label_bbox(ac.pos));
+            }
         }
     }
-    s_acs = std::move(out);
-    if (s_acLayer) {
-        for (const AcDraw &ac : s_acs) {
-            const lv_area_t area = glyph_bbox(ac.pos);
-            lv_obj_invalidate_area(s_acLayer, &area);
-        }
-    }
+    syncLabelPool();
 }
 
 int hitTest(int x, int y) {

@@ -48,6 +48,11 @@
    LV_TICK_CUSTOM no longer exists; use the runtime API instead. */
 #define LV_DEF_REFR_PERIOD 16   /* ms; ~60 Hz cap */
 
+/* A snapshot can invalidate old + new glyph bounds for up to 20 aircraft.
+ * The LVGL default (32) overflows here and silently upgrades the refresh to
+ * the whole 466x466 screen, which visibly pauses the Ripple every poll. */
+#define LV_INV_BUF_SIZE 64
+
 #define LV_DPI_DEF 130
 
 /*=================
