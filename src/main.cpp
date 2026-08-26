@@ -48,6 +48,7 @@ static BrightnessScheduleRule g_brightnessSchedule[BRIGHTNESS_SCHEDULE_RULES] = 
     {false, 0x7F,  0,       0,       50},
 };
 static int                   g_scheduledBrightness = -1;             // panel value, -1=no matching rule
+static constexpr int         BRIGHTNESS_REBOOT_LEAD_MINUTES = 1;
 static int                   g_volume = 60;                          // alert volume 0..100 (web/NVS)
 static bool                  g_muted  = false;                       // mute alert pings
 static int                   g_alertMode = 2;                        // 0=off 1=emergencies 2=new+emergencies (web/NVS)
@@ -325,6 +326,29 @@ static void updateScheduledBrightness() {
     int next = -1;
     struct tm ti;
     if (getLocalTime(&ti, 0)) {
+        int maxPercent = 0;
+        // Reboot once, one minute before the day's highest brightness starts. The
+        // date marker is persisted so the reboot itself cannot retrigger this block.
+        if (ti.tm_year >= 120 &&
+            brightnessScheduleRebootDue(g_brightnessSchedule, BRIGHTNESS_SCHEDULE_RULES,
+                                        ti.tm_wday, ti.tm_hour, ti.tm_min,
+                                        BRIGHTNESS_REBOOT_LEAD_MINUTES, maxPercent)) {
+            const uint32_t dayKey = (uint32_t)(ti.tm_year + 1900) * 10000u +
+                                    (uint32_t)(ti.tm_mon + 1) * 100u + (uint32_t)ti.tm_mday;
+            Preferences p;
+            p.begin("capsuleradar", false);
+            const uint32_t lastRebootDay = p.getUInt("bsrebootday", 0);
+            if (lastRebootDay != dayKey) {
+                p.putUInt("bsrebootday", dayKey);
+                p.end();
+                Serial.printf("[display] rebooting before today's maximum brightness (%d%%)\n",
+                              maxPercent);
+                delay(50);
+                ESP.restart();
+                return;
+            }
+            p.end();
+        }
         int percent = 0;
         if (brightnessSchedulePercent(g_brightnessSchedule, BRIGHTNESS_SCHEDULE_RULES,
                                       ti.tm_wday, ti.tm_hour, ti.tm_min, percent))
@@ -661,6 +685,8 @@ static void handleSchedule() {
         snprintf(key, sizeof(key), "bs%dend", i);   p.putUInt(key, r.endMinute);
         snprintf(key, sizeof(key), "bs%dpct", i);   p.putUInt(key, r.brightnessPercent);
     }
+    // A changed schedule must be allowed to request today's reboot again.
+    p.remove("bsrebootday");
     p.end();
     updateScheduledBrightness();
     g_web.sendHeader("Location", "/");

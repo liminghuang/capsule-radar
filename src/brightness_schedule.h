@@ -51,6 +51,57 @@ inline bool brightnessSchedulePercent(const BrightnessScheduleRule* rules, size_
     return matched;
 }
 
+// Find the first time today at which the day's highest scheduled brightness starts.
+// All-day rules have no activation edge, so they cannot trigger a pre-activation reboot.
+inline bool brightnessScheduleMaxStartForDay(const BrightnessScheduleRule* rules, size_t count,
+                                             int tmWday, int& percentOut, int& startMinuteOut) {
+    if (tmWday < 0 || tmWday > 6) return false;
+    const int today = brightnessDayIndex(tmWday);
+    bool found = false;
+    int allDayMax = 0;
+    int maxPercent = 0;
+    int firstStart = 24 * 60;
+    for (size_t i = 0; i < count; ++i) {
+        const BrightnessScheduleRule& rule = rules[i];
+        if (!rule.enabled || rule.dayMask == 0 ||
+            (rule.dayMask & (1u << today)) == 0 ||
+            rule.startMinute >= 24 * 60 || rule.endMinute >= 24 * 60)
+            continue;
+        int percent = rule.brightnessPercent;
+        if (percent < 1) percent = 1;
+        if (percent > 100) percent = 100;
+        if (rule.startMinute == rule.endMinute) {
+            if (percent > allDayMax) allDayMax = percent;
+            continue;
+        }
+        if (!found || percent > maxPercent) {
+            found = true;
+            maxPercent = percent;
+            firstStart = rule.startMinute;
+        } else if (percent == maxPercent && rule.startMinute < firstStart) {
+            firstStart = rule.startMinute;
+        }
+    }
+    if (!found || allDayMax >= maxPercent) return false;
+    percentOut = maxPercent;
+    startMinuteOut = firstStart;
+    return true;
+}
+
+// The reboot window ends at the activation minute. Keeping this pure makes the
+// once-per-day NVS gate in main.cpp easy to test without Arduino dependencies.
+inline bool brightnessScheduleRebootDue(const BrightnessScheduleRule* rules, size_t count,
+                                        int tmWday, int hour, int minute,
+                                        int leadMinutes, int& percentOut) {
+    int startMinute = 0;
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || leadMinutes < 0 ||
+        !brightnessScheduleMaxStartForDay(rules, count, tmWday, percentOut, startMinute))
+        return false;
+    const int nowMinute = hour * 60 + minute;
+    const int windowStart = startMinute > leadMinutes ? startMinute - leadMinutes : 0;
+    return nowMinute >= windowStart && nowMinute < startMinute;
+}
+
 inline int brightnessPercentToPanel(int percent) {
     if (percent < 1) percent = 1;
     if (percent > 100) percent = 100;

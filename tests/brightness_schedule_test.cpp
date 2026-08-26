@@ -43,6 +43,22 @@ int main() {
     disabled.enabled = false;
     assert(!brightnessSchedulePercent(&disabled, 1, 1, 12, 0, percent));
 
+    int maxPercent = -1;
+    assert(brightnessScheduleRebootDue(office, 1, 1, 7, 59, 1, maxPercent) && maxPercent == 80);
+    assert(!brightnessScheduleRebootDue(office, 1, 7, 7, 59, 1, maxPercent));
+    assert(!brightnessScheduleRebootDue(office, 1, 1, 8, 0, 1, maxPercent));
+
+    // The highest rule wins, and a later low-brightness rule must not move the reboot.
+    BrightnessScheduleRule daily[] = {
+        rule(1u << 0, 8 * 60, 22 * 60, 80),
+        rule(1u << 0, 22 * 60, 8 * 60, 10),
+    };
+    assert(brightnessScheduleRebootDue(daily, 2, 1, 7, 59, 1, maxPercent) && maxPercent == 80);
+
+    // An all-day maximum has no activation edge and must not cause a reboot.
+    BrightnessScheduleRule allDay[] = {rule(1u << 0, 0, 0, 100)};
+    assert(!brightnessScheduleRebootDue(allDay, 1, 1, 23, 59, 1, maxPercent));
+
     assert(brightnessPercentToPanel(1) == 3);
     assert(brightnessPercentToPanel(10) == 26);
     assert(brightnessPercentToPanel(80) == 204);
