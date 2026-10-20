@@ -55,31 +55,57 @@ bool AdsbClient::poll(std::vector<Aircraft>& out) {
     // Try each independent provider once. Retrying the primary immediately can violate its
     // one-request-per-second limit and adds another full timeout to an already slow failure.
     if (fetchFrom(ADSB_PRIMARY_HOST, out)) return true;
-    return fetchFrom(ADSB_FALLBACK_HOST, out);
+    if (fetchFrom(ADSB_FALLBACK_HOST, out)) return true;
+
+    // Some ESP32 TLS fingerprints are rejected by the public API edge even though the
+    // same endpoint works from a desktop client.  ADS-B data is public and contains no
+    // device credentials, so keep a last-resort plaintext path for the known-compatible
+    // primary provider. HTTPS remains preferred for both providers above.
+    Serial.println("[adsb] HTTPS providers failed; trying adsb.lol over HTTP fallback");
+    return fetchFrom(ADSB_PRIMARY_HOST, out, false);
 }
 
-bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
+bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out, bool secure) {
     const double nm = _rangeKm * 0.539957;            // km -> nautical miles (API radius unit)
     char url[160];
-    snprintf(url, sizeof(url), "https://%s/v2/point/%.4f/%.4f/%.0f", host, _lat, _lon, nm);
+    snprintf(url, sizeof(url), "%s://%s/v2/point/%.4f/%.4f/%.0f",
+             secure ? "https" : "http", host, _lat, _lon, nm);
 
-    WiFiClientSecure client;
+    WiFiClientSecure secureClient;
+    WiFiClient plainClient;
 #if ADSB_HTTPS_INSECURE
-    client.setInsecure();                              // hobby: skip cert validation
+    if (secure) secureClient.setInsecure();             // hobby: skip cert validation
 #else
     // client.setCACert(ROOT_CA_PEM);                  // production: pin the root CA
 #endif
 
     HTTPClient http;
     http.setReuse(false);
+    http.useHTTP10(true);               // avoid proxy/API edges rejecting ESP32 HTTP/1.1
     http.setConnectTimeout(6000);    // fail reasonably fast: a slow host must not block the
     http.setTimeout(8000);           // task (and the user's route/photo lookups) for too long
-    if (!http.begin(client, url)) { Serial.printf("[adsb] begin failed (%s)\n", host); return false; }
-    http.addHeader("User-Agent", ADSB_USER_AGENT);
+    const bool begun = secure ? http.begin(secureClient, url)
+                              : http.begin(plainClient, url);
+    if (!begun) {
+        Serial.printf("[adsb] begin failed (%s%s)\n", host, secure ? "" : " over HTTP");
+        return false;
+    }
+    http.setUserAgent(ADSB_USER_AGENT);
     http.addHeader("Accept", "application/json");
+    http.addHeader("Accept-Encoding", "identity");
+    http.addHeader("Connection", "close");
 
     const int code = http.GET();
-    if (code != 200) { Serial.printf("[adsb] HTTP %d (%s)\n", code, host); http.end(); return false; }
+    if (code != 200) {
+        Serial.printf("[adsb] HTTP %d (%s%s)\n", code, host, secure ? "" : " over HTTP");
+        if (code > 0) {
+            String errorBody = http.getString();
+            if (errorBody.length() > 160) errorBody.remove(160);
+            Serial.printf("[adsb] error body: %s\n", errorBody.c_str());
+        }
+        http.end();
+        return false;
+    }
 
     // Only keep the fields we use -> much smaller parsed document.
     JsonDocument filter(&s_jsonPsram);
